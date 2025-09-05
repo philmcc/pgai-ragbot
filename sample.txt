@@ -1,0 +1,2 @@
+Hello from RAG bot
+This is a test document.

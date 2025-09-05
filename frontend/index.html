@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>pgai RAG Chatbot (Postgres-only)</title>
+  <style>
+    body { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background: #0b1020; color: #e6e6eb; }
+    header { padding: 16px 24px; border-bottom: 1px solid #1e2238; display: flex; align-items: center; justify-content: space-between; }
+    header h1 { margin: 0; font-size: 18px; }
+    main { display: grid; grid-template-columns: 340px 1fr; gap: 0; height: calc(100vh - 64px); }
+    aside { border-right: 1px solid #1e2238; padding: 16px; overflow-y: auto; }
+    section { display: flex; flex-direction: column; height: 100%; }
+    .card { background: #0f1530; border: 1px solid #1e2238; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+    label { display: block; font-size: 12px; color: #9aa4bf; margin-bottom: 6px; }
+    input[type="text"], input[type="password"], textarea { width: 100%; padding: 10px 12px; background: #0b1020; border: 1px solid #29304d; color: #e6e6eb; border-radius: 8px; }
+    textarea { min-height: 80px; resize: vertical; }
+    button { background: #3b82f6; color: white; border: 0; padding: 10px 14px; border-radius: 8px; cursor: pointer; font-weight: 600; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .chat { flex: 1; display: flex; flex-direction: column; padding: 16px; overflow: hidden; }
+    .messages { flex: 1; overflow-y: auto; padding-right: 8px; }
+    .msg { margin-bottom: 12px; }
+    .role { font-size: 12px; color: #9aa4bf; margin-bottom: 4px; }
+    .bubble { background: #0f1530; border: 1px solid #1e2238; border-radius: 10px; padding: 10px 12px; white-space: pre-wrap; }
+    .footer { border-top: 1px solid #1e2238; padding: 12px 16px; }
+    a { color: #60a5fa; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Postgres-only RAG Chatbot (pgai + pgvector)</h1>
+    <div>
+      <a href="http://localhost:9001" target="_blank">MinIO Console</a>
+      &nbsp;·&nbsp;
+      <a href="#" id="ingestNow">Ingest now</a>
+    </div>
+  </header>
+  <main>
+    <aside>
+      <div class="card">
+        <label>OpenAI API Key</label>
+        <input type="password" id="apiKey" placeholder="sk-..." />
+        <div class="row" style="margin-top:8px;">
+          <button id="saveKey">Save</button>
+          <button id="clearKey" style="background:#ef4444;">Clear</button>
+        </div>
+        <p style="font-size:12px;color:#9aa4bf;margin-top:8px;">Stored in browser localStorage and sent as header X-OpenAI-Key.</p>
+      </div>
+      <div class="card">
+        <label>Models</label>
+        <input type="text" id="embedModel" placeholder="text-embedding-3-small" />
+        <input type="text" id="chatModel" placeholder="gpt-4o-mini" style="margin-top:8px;"/>
+        <button id="saveModels" style="margin-top:8px;">Save Models</button>
+        <p style="font-size:12px;color:#9aa4bf;margin-top:8px;">Sent via headers X-Embedding-Model and X-Chat-Model.</p>
+      </div>
+      <div class="card">
+        <label>Ingest status</label>
+        <pre id="status" style="white-space:pre-wrap"></pre>
+        <button id="refreshStatus">Refresh</button>
+      </div>
+      <div class="card">
+        <label>Documents</label>
+        <div class="row" style="margin-bottom:8px;">
+          <button id="listDocs">List documents</button>
+        </div>
+        <pre id="docsList" style="white-space:pre-wrap; max-height:200px; overflow:auto;"></pre>
+      </div>
+      <div class="card">
+        <label>Debug retrieval</label>
+        <div class="row" style="margin-bottom:8px;">
+          <input type="checkbox" id="showChunks" />
+          <span style="font-size:12px;color:#9aa4bf;">Show retrieved chunks</span>
+        </div>
+        <div class="row" style="margin-bottom:8px;">
+          <input type="text" id="threshold" value="0.8" style="width:100px;" />
+          <span style="font-size:12px;color:#9aa4bf;">Threshold (chat uses default 0.8)</span>
+        </div>
+        <pre id="retrievalDebug" style="white-space:pre-wrap; max-height:240px; overflow:auto;"></pre>
+      </div>
+      <div class="card">
+        <p style="font-size:12px;color:#9aa4bf;">Upload files in the MinIO Console to bucket <b>documents</b>.
+        Supported: txt, md, docx, pdf (best effort), csv, json.</p>
+      </div>
+    </aside>
+
+    <section class="chat">
+      <div class="messages" id="messages"></div>
+      <div class="footer">
+        <label>Ask a question</label>
+        <textarea id="question" placeholder="Ask about your documents..."></textarea>
+        <div class="row" style="margin-top:8px;">
+          <button id="askBtn">Ask</button>
+          <input type="text" id="topK" value="5" style="width:80px;" />
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="./main.js"></script>
+</body>
+</html>

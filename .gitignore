@@ -1,0 +1,47 @@
+# macOS
+.DS_Store
+
+# IDEs and editors
+.vscode/
+.idea/
+*.code-workspace
+
+# Node / frontend (just in case)
+node_modules/
+
+# Python (if used by PL/Python tooling)
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log
+
+# Environment and secrets
+.env
+*.env
+*.pem
+*.key
+*.crt
+*.p12
+
+# Local data buckets / uploads
+minio-data/
+
+# Local docker volumes or temp dirs (defensive)
+pgdata/
+data/
+.tmp/
+temp/
+
+# Archives
+*.zip
+*.tar
+*.tgz
+*.gz
+
+# Internal docs not for the public repo
+TUTORIAL.md
+GUIDE.md
+GUIDE copy.md
+LINKEDIN_ARTICLE.md
