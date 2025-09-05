@@ -1,5 +1,7 @@
 # Postgres-only RAG Chatbot (pgai + pgvector + PostgREST)
 
+GitHub repository: https://github.com/philmcc/pgai-ragbot
+
 This is a minimal demo of a RAG chatbot implemented almost entirely in PostgreSQL using:
 
 - TimescaleDB (PostgreSQL)
