@@ -63,3 +63,32 @@ BEGIN
     RAISE NOTICE 'section_path may already exist: %', SQLERRM;
   END;
 END$$;
+
+-- Secrets/config (store API keys and other small config values)
+-- Note: In production, prefer a managed secret store. This is for demo/local use.
+CREATE TABLE IF NOT EXISTS app.app_secrets (
+  name  text PRIMARY KEY,
+  value text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Upsert helper to keep updated_at fresh (trigger)
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger WHERE tgname = 'trg_app_secrets_updated_at'
+  ) THEN
+    CREATE OR REPLACE FUNCTION app.trg_app_secrets_updated_at()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      NEW.updated_at := now();
+      RETURN NEW;
+    END;$$;
+    CREATE TRIGGER trg_app_secrets_updated_at
+      BEFORE UPDATE ON app.app_secrets
+      FOR EACH ROW EXECUTE FUNCTION app.trg_app_secrets_updated_at();
+  END IF;
+EXCEPTION WHEN others THEN
+  RAISE NOTICE 'app_secrets trigger may already exist: %', SQLERRM;
+END$$;

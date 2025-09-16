@@ -42,10 +42,11 @@
         <label>OpenAI API Key</label>
         <input type="password" id="apiKey" placeholder="sk-..." />
         <div class="row" style="margin-top:8px;">
-          <button id="saveKey">Save</button>
+          <button id="saveKey">Save to database</button>
           <button id="clearKey" style="background:#ef4444;">Clear</button>
         </div>
-        <p style="font-size:12px;color:#9aa4bf;margin-top:8px;">Stored in browser localStorage and sent as header X-OpenAI-Key.</p>
+        <p id="keyStatus" style="font-size:12px;color:#9aa4bf;margin-top:8px;">Key status: unknown</p>
+        <p style="font-size:12px;color:#9aa4bf;margin-top:8px;">The key is stored server-side in Postgres (table <code>app.app_secrets</code>) and used by the database for embeddings/chat. The browser does not store or send the key on each request.</p>
       </div>
       <div class="card">
         <label>Models</label>

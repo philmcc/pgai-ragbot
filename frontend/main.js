@@ -2,10 +2,8 @@ const API = '/api';
 
 function headers() {
   const h = { 'Content-Type': 'application/json' };
-  const key = localStorage.getItem('openai_key');
   const embed = localStorage.getItem('embed_model');
   const chat = localStorage.getItem('chat_model');
-  if (key) h['X-OpenAI-Key'] = key;
   if (embed) h['X-Embedding-Model'] = embed;
   if (chat) h['X-Chat-Model'] = chat;
   return h;
@@ -126,14 +124,31 @@ async function ask() {
 }
 
 function init() {
-  // Key + model storage
-  document.getElementById('saveKey').onclick = () => {
-    localStorage.setItem('openai_key', document.getElementById('apiKey').value.trim());
-    alert('Saved');
+  // Key storage is in DB now
+  document.getElementById('saveKey').onclick = async () => {
+    const key = document.getElementById('apiKey').value.trim();
+    try {
+      const res = await fetch(`${API}/rpc/set_openai_key`, {
+        method: 'POST', headers: headers(), body: JSON.stringify({ p_key: key })
+      });
+      if (!res.ok) throw new Error(await res.text());
+      await refreshKeyStatus();
+      alert('Saved to database');
+    } catch (e) {
+      alert(`Save failed: ${e?.message || e}`);
+    }
   };
-  document.getElementById('clearKey').onclick = () => {
-    localStorage.removeItem('openai_key');
-    alert('Cleared');
+  document.getElementById('clearKey').onclick = async () => {
+    try {
+      const res = await fetch(`${API}/rpc/set_openai_key`, {
+        method: 'POST', headers: headers(), body: JSON.stringify({ p_key: '' })
+      });
+      if (!res.ok) throw new Error(await res.text());
+      await refreshKeyStatus();
+      alert('Cleared in database');
+    } catch (e) {
+      alert(`Clear failed: ${e?.message || e}`);
+    }
   };
   document.getElementById('saveModels').onclick = () => {
     localStorage.setItem('embed_model', document.getElementById('embedModel').value.trim() || 'text-embedding-3-small');
@@ -169,6 +184,19 @@ function init() {
 
   fetchStatus();
   listDocs();
+  refreshKeyStatus();
+}
+
+async function refreshKeyStatus() {
+  try {
+    const res = await fetch(`${API}/rpc/openai_key_status`, { headers: headers() });
+    const data = await res.json();
+    const el = document.getElementById('keyStatus');
+    if (el) el.textContent = `Key status: ${data?.configured ? 'configured' : 'not set'}${data?.updated_at ? ' (updated ' + new Date(data.updated_at).toLocaleString() + ')' : ''}`;
+  } catch (e) {
+    const el = document.getElementById('keyStatus');
+    if (el) el.textContent = 'Key status: error';
+  }
 }
 
 window.addEventListener('DOMContentLoaded', init);

@@ -8,3 +8,5 @@ GRANT SELECT ON app.v_ingest_status TO anon;
 GRANT EXECUTE ON FUNCTION app.chat_rag(text, int) TO anon;
 GRANT EXECUTE ON FUNCTION app.search_chunks(text, int, float4) TO anon;
 GRANT EXECUTE ON FUNCTION app.run_ingest_once() TO anon;
+GRANT EXECUTE ON FUNCTION app.openai_key_status() TO anon;
+GRANT EXECUTE ON FUNCTION app.set_openai_key(text) TO anon;

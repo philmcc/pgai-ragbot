@@ -82,6 +82,25 @@ services:
       sleep 2;
       "
 
+  vectorizer-worker:
+    image: timescale/pgai-vectorizer-worker:latest
+    container_name: pgai-vectorizer-worker
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Database URL for the vectorizer worker
+      - PGAI_VECTORIZER_WORKER_DB_URL=postgres://postgres:postgres@db:5432/pgai
+      # OpenAI key for embeddings (set via environment or .env)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # MinIO / S3 access for smart_open (if loading from URIs is used later)
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_EC2_METADATA_DISABLED=true
+      - AWS_ENDPOINT_URL=http://minio:9000
+    command: ["--poll-interval", "5s"]
+
   frontend:
     image: ${NGINX_IMAGE:-nginx:1.27.0-alpine}
     container_name: pgai-frontend

@@ -229,6 +229,131 @@ BEGIN
 END;
 $$;
 
+-- Agentic-ish chunker: prefers semantic boundaries (headings/blank lines) and produces
+-- variable-sized chunks with provenance. This is a heuristic implementation that does not
+-- require an LLM to run, but aligns chunks to Markdown-style structure and paragraph breaks.
+-- We can later enrich this to consult pgai for boundary hints.
+CREATE OR REPLACE FUNCTION app.agentic_chunk_text(p_text text,
+                                                 max_chunk_chars int DEFAULT 1400,
+                                                 min_chunk_chars int DEFAULT 400)
+RETURNS TABLE(seq int, chunk text, char_start int, char_end int, section_path text)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  lines text[];
+  n int;
+  i int := 1;
+  buf text := '';
+  buf_start int := 1;
+  cur_start int := 1;
+  cur_section text := NULL;
+  seqno int := 0;
+  line text;
+  line_len int;
+  abs_pos int := 1; -- absolute character position (1-based)
+  can_flush boolean;
+BEGIN
+  IF p_text IS NULL OR length(p_text) = 0 THEN
+    RETURN;
+  END IF;
+
+  -- Normalize newlines
+  p_text := replace(p_text, '\r\n', '\n');
+  p_text := replace(p_text, '\r', '\n');
+
+  lines := regexp_split_to_array(p_text, E'\n');
+  n := array_length(lines, 1);
+  IF n IS NULL THEN
+    -- Single line fallback
+    lines := ARRAY[p_text];
+    n := 1;
+  END IF;
+
+  WHILE i <= n LOOP
+    line := COALESCE(lines[i], '');
+    line_len := length(line);
+
+    -- Detect headings to set section path (e.g., Markdown #, ##, ###)
+    IF line ~ E'^\s*#{1,6}\s+' THEN
+      -- If current buffer has enough content, flush it before changing section
+      can_flush := length(buf) >= min_chunk_chars;
+      IF can_flush THEN
+        seqno := seqno + 1;
+        seq := seqno;
+        chunk := buf;
+        char_start := buf_start;
+        char_end := abs_pos - 1; -- end before current line
+        section_path := cur_section;
+        RETURN NEXT;
+        buf := '';
+      END IF;
+      cur_section := regexp_replace(line, E'^\s*#{1,6}\s+', '');
+      buf_start := abs_pos + line_len + 1; -- next line start
+    ELSIF line ~ E'^\s*$' THEN
+      -- Paragraph boundary: consider flushing if buffer large enough
+      IF length(buf) >= min_chunk_chars THEN
+        seqno := seqno + 1;
+        seq := seqno;
+        chunk := buf;
+        char_start := buf_start;
+        char_end := abs_pos - 1; -- up to before this blank line
+        section_path := cur_section;
+        RETURN NEXT;
+        buf := '';
+        buf_start := abs_pos; -- start at this boundary
+      ELSIF length(buf) >= max_chunk_chars THEN
+        -- Hard flush to avoid overly large chunks
+        seqno := seqno + 1;
+        seq := seqno;
+        chunk := buf;
+        char_start := buf_start;
+        char_end := abs_pos - 1;
+        section_path := cur_section;
+        RETURN NEXT;
+        buf := '';
+        buf_start := abs_pos;
+      ELSE
+        -- Keep boundary but don't flush yet
+        buf := buf || '\n';
+      END IF;
+    ELSE
+      -- Regular content line: append
+      IF length(buf) > 0 THEN
+        buf := buf || '\n' || line;
+      ELSE
+        buf := line;
+      END IF;
+      IF length(buf) >= max_chunk_chars THEN
+        seqno := seqno + 1;
+        seq := seqno;
+        chunk := buf;
+        char_start := buf_start;
+        char_end := abs_pos + line_len; -- include this line
+        section_path := cur_section;
+        RETURN NEXT;
+        buf := '';
+        buf_start := char_end + 1;
+      END IF;
+    END IF;
+
+    -- Advance absolute position (+1 for newline except last line handled below)
+    abs_pos := abs_pos + line_len + 1;
+    i := i + 1;
+  END LOOP;
+
+  -- Flush remainder
+  IF length(buf) > 0 THEN
+    seqno := seqno + 1;
+    seq := seqno;
+    chunk := buf;
+    char_start := buf_start;
+    char_end := GREATEST(buf_start + length(buf) - 1, buf_start);
+    section_path := cur_section;
+    RETURN NEXT;
+  END IF;
+END;
+$$;
+
 -- Recreate process_pending_documents to use simple_chunk_text
 CREATE OR REPLACE FUNCTION app.process_pending_documents()
 RETURNS int
@@ -246,26 +371,15 @@ BEGIN
     LEFT JOIN app.doc_chunks c ON c.doc_id = d.id
     WHERE c.doc_id IS NULL
   ), ins AS (
-    INSERT INTO app.doc_chunks (doc_id, seq, chunk)
-    SELECT nd.id, c.seq, c.chunk
+    INSERT INTO app.doc_chunks (doc_id, seq, chunk, char_start, char_end, section_path)
+    SELECT nd.id, c.seq, c.chunk, c.char_start, c.char_end, c.section_path
     FROM new_docs nd
-    CROSS JOIN LATERAL app.simple_chunk_text(nd.content_text, 1000, 200) c
+    CROSS JOIN LATERAL app.agentic_chunk_text(nd.content_text, 1400, 400) c
     RETURNING 1
   )
   SELECT COALESCE(count(*),0) INTO v_count FROM ins;
 
-  -- Embed missing chunks
-  IF v_api_key IS NOT NULL AND v_api_key <> '' THEN
-    BEGIN
-      UPDATE app.doc_chunks c
-      SET embedding = ai.openai_embed(v_model, c.chunk, api_key=>v_api_key)
-      WHERE c.embedding IS NULL;
-    EXCEPTION WHEN others THEN
-      RAISE NOTICE 'Embedding failed: %', SQLERRM;
-    END;
-  ELSE
-    RAISE NOTICE 'Skipping embedding (no OpenAI API key set)';
-  END IF;
+  -- Do not embed here. The pgai vectorizer worker will populate embeddings asynchronously.
 
   RETURN v_count;
 END;
