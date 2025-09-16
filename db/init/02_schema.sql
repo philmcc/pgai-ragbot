@@ -20,6 +20,11 @@ CREATE TABLE IF NOT EXISTS doc_chunks (
   doc_id    bigint NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
   seq       int    NOT NULL,
   chunk     text   NOT NULL,
+  -- Optional provenance
+  char_start int,
+  char_end   int,
+  section_path text,
+  -- Embedding populated by vectorizer (destination_column) or by DB in earlier versions
   embedding vector(1536),
   PRIMARY KEY (doc_id, seq)
 );
@@ -38,3 +43,23 @@ SELECT d.id, d.s3_bucket, d.s3_key,
 FROM documents d
 LEFT JOIN doc_chunks c ON c.doc_id = d.id
 GROUP BY d.id;
+
+-- Idempotent schema upgrades when running against an existing database
+DO $$
+BEGIN
+  BEGIN
+    ALTER TABLE app.doc_chunks ADD COLUMN IF NOT EXISTS char_start int;
+  EXCEPTION WHEN others THEN
+    RAISE NOTICE 'char_start may already exist: %', SQLERRM;
+  END;
+  BEGIN
+    ALTER TABLE app.doc_chunks ADD COLUMN IF NOT EXISTS char_end int;
+  EXCEPTION WHEN others THEN
+    RAISE NOTICE 'char_end may already exist: %', SQLERRM;
+  END;
+  BEGIN
+    ALTER TABLE app.doc_chunks ADD COLUMN IF NOT EXISTS section_path text;
+  EXCEPTION WHEN others THEN
+    RAISE NOTICE 'section_path may already exist: %', SQLERRM;
+  END;
+END$$;
