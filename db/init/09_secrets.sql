@@ -27,3 +27,12 @@ BEGIN
   RETURN 'ok';
 END;
 $$;
+
+-- Privileged getter (no grant to anon). Useful for ops/migrations running as postgres.
+CREATE OR REPLACE FUNCTION app.get_openai_key()
+RETURNS text
+LANGUAGE sql
+SECURITY DEFINER
+AS $$
+  SELECT value FROM app.app_secrets WHERE name = 'openai_api_key' LIMIT 1;
+$$;

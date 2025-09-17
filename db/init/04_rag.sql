@@ -19,7 +19,7 @@ BEGIN
   v_embed := ai.openai_embed(v_model, p_query, api_key=>v_api_key);
   RETURN QUERY
   WITH scored AS (
-    SELECT c.doc_id, c.seq, c.chunk, (c.embedding <=> v_embed)::float4 AS distance
+    SELECT c.doc_id, c.seq, c.chunk_text AS chunk, (c.embedding <=> v_embed)::float4 AS distance
     FROM app.doc_chunks c
     WHERE c.embedding IS NOT NULL
     ORDER BY c.embedding <=> v_embed

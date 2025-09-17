@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS documents (
 CREATE TABLE IF NOT EXISTS doc_chunks (
   doc_id    bigint NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
   seq       int    NOT NULL,
-  chunk     text   NOT NULL,
+  chunk_text text   NOT NULL,
   -- Optional provenance
   char_start int,
   char_end   int,

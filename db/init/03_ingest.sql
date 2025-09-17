@@ -371,7 +371,7 @@ BEGIN
     LEFT JOIN app.doc_chunks c ON c.doc_id = d.id
     WHERE c.doc_id IS NULL
   ), ins AS (
-    INSERT INTO app.doc_chunks (doc_id, seq, chunk, char_start, char_end, section_path)
+    INSERT INTO app.doc_chunks (doc_id, seq, chunk_text, char_start, char_end, section_path)
     SELECT nd.id, c.seq, c.chunk, c.char_start, c.char_end, c.section_path
     FROM new_docs nd
     CROSS JOIN LATERAL app.agentic_chunk_text(nd.content_text, 1400, 400) c
