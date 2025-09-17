@@ -64,6 +64,18 @@ BEGIN
   END;
 END$$;
 
+-- Expose vectorizer status via app schema for PostgREST
+CREATE OR REPLACE VIEW app.v_vectorizer_status AS
+SELECT id,
+       name,
+       source_table,
+       target_table,
+       view,
+       embedding_column,
+       pending_items,
+       disabled
+FROM ai.vectorizer_status;
+
 -- Secrets/config (store API keys and other small config values)
 -- Note: In production, prefer a managed secret store. This is for demo/local use.
 CREATE TABLE IF NOT EXISTS app.app_secrets (

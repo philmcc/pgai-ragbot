@@ -15,6 +15,16 @@ async function fetchStatus() {
   document.getElementById('status').textContent = JSON.stringify(data, null, 2);
 }
 
+async function fetchVectorizerStatus() {
+  try {
+    const res = await fetch(`${API}/v_vectorizer_status`, { headers: headers() });
+    const data = await res.json();
+    document.getElementById('vecStatus').textContent = JSON.stringify(data, null, 2);
+  } catch (e) {
+    document.getElementById('vecStatus').textContent = 'Unavailable';
+  }
+}
+
 async function listDocs() {
   const pre = document.getElementById('docsList');
   if (!pre) return;
@@ -158,6 +168,7 @@ function init() {
 
   document.getElementById('askBtn').onclick = ask;
   document.getElementById('refreshStatus').onclick = fetchStatus;
+  document.getElementById('refreshVec').onclick = fetchVectorizerStatus;
   document.getElementById('ingestNow').onclick = (e) => { e.preventDefault(); ingestNow(); };
   const listBtn = document.getElementById('listDocs');
   if (listBtn) listBtn.onclick = listDocs;
@@ -185,6 +196,7 @@ function init() {
   fetchStatus();
   listDocs();
   refreshKeyStatus();
+  fetchVectorizerStatus();
 }
 
 async function refreshKeyStatus() {

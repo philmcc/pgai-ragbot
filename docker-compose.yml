@@ -100,7 +100,9 @@ services:
       - AWS_DEFAULT_REGION=us-east-1
       - AWS_EC2_METADATA_DISABLED=true
       - AWS_ENDPOINT_URL=http://minio:9000
-    command: ["--poll-interval", "5s"]
+    volumes:
+      - ./scripts:/scripts:ro
+    entrypoint: ["/bin/sh", "/scripts/vectorizer-start.sh"]
 
   frontend:
     image: ${NGINX_IMAGE:-nginx:1.27.0-alpine}

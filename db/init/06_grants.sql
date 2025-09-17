@@ -2,7 +2,9 @@
 SET search_path = app, public;
 
 GRANT USAGE ON SCHEMA app TO anon;
+GRANT USAGE ON SCHEMA ai TO anon;
 GRANT SELECT ON app.v_ingest_status TO anon;
+GRANT SELECT ON app.v_vectorizer_status TO anon;
 
 -- RPC functions
 GRANT EXECUTE ON FUNCTION app.chat_rag(text, int) TO anon;
