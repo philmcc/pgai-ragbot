@@ -1,3 +1,39 @@
+-- RPC: delete a single document by id (cascades to chunks)
+CREATE OR REPLACE FUNCTION app.delete_document(p_id bigint)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE v int; BEGIN
+  DELETE FROM app.documents WHERE id = p_id;
+  GET DIAGNOSTICS v = ROW_COUNT;
+  IF v > 0 THEN RETURN 'deleted'; ELSE RETURN 'not_found'; END IF;
+END;$$;
+
+-- RPC: delete a single document by s3_key (cascades to chunks)
+CREATE OR REPLACE FUNCTION app.delete_document_by_key(p_key text)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE v int; BEGIN
+  DELETE FROM app.documents WHERE s3_key = p_key;
+  GET DIAGNOSTICS v = ROW_COUNT;
+  IF v > 0 THEN RETURN 'deleted'; ELSE RETURN 'not_found'; END IF;
+END;$$;
+
+-- RPC: delete all documents (use with care)
+CREATE OR REPLACE FUNCTION app.delete_all_documents()
+RETURNS int
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE v int; BEGIN
+  DELETE FROM app.documents;
+  GET DIAGNOSTICS v = ROW_COUNT;
+  RETURN v;
+END;$$;
+
 -- S3 (MinIO) sync using PL/Python and boto3
 SET search_path = app, public;
 
@@ -165,6 +201,172 @@ BEGIN
 END;
 $$;
 
+-- Chunking mode selector (heuristic | llm)
+CREATE OR REPLACE FUNCTION app.chunking_mode() RETURNS text LANGUAGE sql AS $$
+  SELECT COALESCE(NULLIF(current_setting('app.chunking_mode', true), ''), 'heuristic')
+$$;
+
+-- LLM proposes boundary plan as JSON [{start:int, end:int, title:text|null}, ...]
+CREATE OR REPLACE FUNCTION app.llm_propose_boundaries(p_text text,
+                                                      max_chunk_chars int DEFAULT 1400,
+                                                      min_chunk_chars int DEFAULT 400)
+RETURNS jsonb
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_model   text := app.chat_model();
+  v_api_key text := NULLIF(current_setting('ai.openai_api_key', true), '');
+  v_prompt  text;
+  v_raw     text;
+  v_json    jsonb := '[]'::jsonb;
+  v_text    text;
+BEGIN
+  -- Limit text to keep token usage reasonable; windows can be added later.
+  v_text := COALESCE(p_text, '');
+  IF length(v_text) > 12000 THEN
+    v_text := substr(v_text, 1, 12000);
+  END IF;
+
+  v_prompt :=
+    'You are a chunking planner. Output ONLY JSON array with objects {"start":int,"end":int,"title":string|null}.' || E'\n' ||
+    'Rules:' || E'\n' ||
+    '- Use 1-based inclusive char offsets within the provided TEXT.' || E'\n' ||
+    '- Aim for chunk sizes between ' || min_chunk_chars || ' and ' || max_chunk_chars || ' characters.' || E'\n' ||
+    '- Prefer boundaries at headings or paragraph breaks; avoid splitting code blocks/tables.' || E'\n' ||
+    '- Do NOT include any explanations or code fences.' || E'\n\n' ||
+    'TEXT:\n' || v_text;
+
+  SELECT ai.openai_chat_complete(
+           v_model,
+           jsonb_build_array(
+             jsonb_build_object('role','system','content','Return only JSON. No prose. Plan chunk boundaries for best Q&A.'),
+             jsonb_build_object('role','user','content', v_prompt)
+           ),
+           api_key => v_api_key
+         )->'choices'->0->'message'->>'content'
+  INTO v_raw;
+
+  IF v_raw IS NULL OR v_raw = '' THEN
+    RETURN '[]'::jsonb;
+  END IF;
+
+  -- Strip accidental code fences and cast to JSONB
+  v_raw := regexp_replace(v_raw, '^```[a-zA-Z]*\n?', '', 'g');
+  v_raw := regexp_replace(v_raw, '\n?```$', '', 'g');
+  BEGIN
+    v_json := v_raw::jsonb;
+  EXCEPTION WHEN others THEN
+    RETURN '[]'::jsonb;
+  END;
+  IF jsonb_typeof(v_json) <> 'array' THEN
+    RETURN '[]'::jsonb;
+  END IF;
+  RETURN v_json;
+END;
+$$;
+
+-- Convert boundary plan to chunks with provenance; fallback to heuristic if invalid/empty
+CREATE OR REPLACE FUNCTION app.agentic_chunk_llm(p_text text,
+                                                 max_chunk_chars int DEFAULT 1400,
+                                                 min_chunk_chars int DEFAULT 400)
+RETURNS TABLE(seq int, chunk text, char_start int, char_end int, section_path text)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_plan jsonb := app.llm_propose_boundaries(p_text, max_chunk_chars, min_chunk_chars);
+  v_idx int := 0;
+  v_start int;
+  v_end int;
+  v_title text;
+  v_len int := length(COALESCE(p_text,''));
+  v_any boolean := false;
+BEGIN
+  IF v_plan IS NULL OR jsonb_typeof(v_plan) <> 'array' OR jsonb_array_length(v_plan) = 0 THEN
+    RETURN QUERY
+      SELECT seq, chunk, char_start, char_end, section_path
+      FROM app.agentic_chunk_text(p_text, max_chunk_chars, min_chunk_chars)
+      CROSS JOIN LATERAL (
+        SELECT 1 as dummy
+      ) d
+      -- Map to expected column names
+      ;
+    RETURN;
+  END IF;
+
+  FOR v_rec IN SELECT * FROM jsonb_array_elements(v_plan) AS e(elem)
+  LOOP
+    v_start := GREATEST(1, COALESCE((v_rec.elem->>'start')::int, 0));
+    v_end   := LEAST(v_len, COALESCE((v_rec.elem->>'end')::int, 0));
+    v_title := NULLIF(v_rec.elem->>'title','');
+    IF v_start < v_end AND v_start <= v_len AND v_end >= 1 THEN
+      v_idx := v_idx + 1;
+      seq := v_idx;
+      char_start := v_start;
+      char_end := v_end;
+      section_path := v_title;
+      chunk := substr(p_text, char_start, char_end - char_start + 1);
+      v_any := true;
+      RETURN NEXT;
+    END IF;
+  END LOOP;
+
+  IF NOT v_any THEN
+    RETURN QUERY
+      SELECT seq, chunk, char_start, char_end, section_path
+      FROM app.agentic_chunk_text(p_text, max_chunk_chars, min_chunk_chars);
+  END IF;
+END;
+$$;
+
+-- Recreate process_pending_documents to use simple_chunk_text
+CREATE OR REPLACE FUNCTION app.process_pending_documents()
+RETURNS int
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_count int := 0;
+  v_mode  text := app.chunking_mode();
+BEGIN
+  -- Insert chunks for docs lacking any using selected chunker
+  IF v_mode = 'llm' THEN
+    WITH new_docs AS (
+      SELECT d.id, d.content_text
+      FROM app.documents d
+      LEFT JOIN app.doc_chunks c ON c.doc_id = d.id
+      WHERE c.doc_id IS NULL
+    ), ins AS (
+      INSERT INTO app.doc_chunks (doc_id, seq, chunk, char_start, char_end, section_path)
+      SELECT nd.id, c.seq, c.chunk, c.char_start, c.char_end, c.section_path
+      FROM new_docs nd
+      CROSS JOIN LATERAL app.agentic_chunk_llm(nd.content_text, 1400, 400) c
+      RETURNING 1
+    )
+    SELECT COALESCE(count(*),0) INTO v_count FROM ins;
+  ELSE
+    WITH new_docs AS (
+      SELECT d.id, d.content_text
+      FROM app.documents d
+      LEFT JOIN app.doc_chunks c ON c.doc_id = d.id
+      WHERE c.doc_id IS NULL
+    ), ins AS (
+      INSERT INTO app.doc_chunks (doc_id, seq, chunk)
+      SELECT nd.id, c.seq, c.chunk
+      FROM new_docs nd
+      CROSS JOIN LATERAL app.simple_chunk_text(nd.content_text, 1000, 200) c
+      RETURNING 1
+    )
+    SELECT COALESCE(count(*),0) INTO v_count FROM ins;
+  END IF;
+
+  -- Embed missing chunks
+  UPDATE app.doc_chunks c
+  SET embedding = ai.openai_embed(app.embedding_model(), c.chunk)
+  WHERE c.embedding IS NULL;
+
+  RETURN v_count;
+END;
+$$;
+
 -- Simple word-based chunker to avoid external dependencies
 CREATE OR REPLACE FUNCTION app.simple_chunk_text(p_text text, chunk_size int DEFAULT 1000, chunk_overlap int DEFAULT 200)
 RETURNS TABLE(seq int, chunk text)
@@ -229,6 +431,131 @@ BEGIN
 END;
 $$;
 
+-- Agentic-ish chunker: prefers semantic boundaries (headings/blank lines) and produces
+-- variable-sized chunks with provenance. This is a heuristic implementation that does not
+-- require an LLM to run, but aligns chunks to Markdown-style structure and paragraph breaks.
+-- We can later enrich this to consult pgai for boundary hints.
+CREATE OR REPLACE FUNCTION app.agentic_chunk_text(p_text text,
+                                                 max_chunk_chars int DEFAULT 1400,
+                                                 min_chunk_chars int DEFAULT 400)
+RETURNS TABLE(seq int, chunk text, char_start int, char_end int, section_path text)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  lines text[];
+  n int;
+  i int := 1;
+  buf text := '';
+  buf_start int := 1;
+  cur_start int := 1;
+  cur_section text := NULL;
+  seqno int := 0;
+  line text;
+  line_len int;
+  abs_pos int := 1; -- absolute character position (1-based)
+  can_flush boolean;
+BEGIN
+  IF p_text IS NULL OR length(p_text) = 0 THEN
+    RETURN;
+  END IF;
+
+  -- Normalize newlines
+  p_text := replace(p_text, '\r\n', '\n');
+  p_text := replace(p_text, '\r', '\n');
+
+  lines := regexp_split_to_array(p_text, E'\n');
+  n := array_length(lines, 1);
+  IF n IS NULL THEN
+    -- Single line fallback
+    lines := ARRAY[p_text];
+    n := 1;
+  END IF;
+
+  WHILE i <= n LOOP
+    line := COALESCE(lines[i], '');
+    line_len := length(line);
+
+    -- Detect headings to set section path (e.g., Markdown #, ##, ###)
+    IF line ~ E'^\s*#{1,6}\s+' THEN
+      -- If current buffer has enough content, flush it before changing section
+      can_flush := length(buf) >= min_chunk_chars;
+      IF can_flush THEN
+        seqno := seqno + 1;
+        seq := seqno;
+        chunk := buf;
+        char_start := buf_start;
+        char_end := abs_pos - 1; -- end before current line
+        section_path := cur_section;
+        RETURN NEXT;
+        buf := '';
+      END IF;
+      cur_section := regexp_replace(line, E'^\s*#{1,6}\s+', '');
+      buf_start := abs_pos + line_len + 1; -- next line start
+    ELSIF line ~ E'^\s*$' THEN
+      -- Paragraph boundary: consider flushing if buffer large enough
+      IF length(buf) >= min_chunk_chars THEN
+        seqno := seqno + 1;
+        seq := seqno;
+        chunk := buf;
+        char_start := buf_start;
+        char_end := abs_pos - 1; -- up to before this blank line
+        section_path := cur_section;
+        RETURN NEXT;
+        buf := '';
+        buf_start := abs_pos; -- start at this boundary
+      ELSIF length(buf) >= max_chunk_chars THEN
+        -- Hard flush to avoid overly large chunks
+        seqno := seqno + 1;
+        seq := seqno;
+        chunk := buf;
+        char_start := buf_start;
+        char_end := abs_pos - 1;
+        section_path := cur_section;
+        RETURN NEXT;
+        buf := '';
+        buf_start := abs_pos;
+      ELSE
+        -- Keep boundary but don't flush yet
+        buf := buf || '\n';
+      END IF;
+    ELSE
+      -- Regular content line: append
+      IF length(buf) > 0 THEN
+        buf := buf || '\n' || line;
+      ELSE
+        buf := line;
+      END IF;
+      IF length(buf) >= max_chunk_chars THEN
+        seqno := seqno + 1;
+        seq := seqno;
+        chunk := buf;
+        char_start := buf_start;
+        char_end := abs_pos + line_len; -- include this line
+        section_path := cur_section;
+        RETURN NEXT;
+        buf := '';
+        buf_start := char_end + 1;
+      END IF;
+    END IF;
+
+    -- Advance absolute position (+1 for newline except last line handled below)
+    abs_pos := abs_pos + line_len + 1;
+    i := i + 1;
+  END LOOP;
+
+  -- Flush remainder
+  IF length(buf) > 0 THEN
+    seqno := seqno + 1;
+    seq := seqno;
+    chunk := buf;
+    char_start := buf_start;
+    char_end := GREATEST(buf_start + length(buf) - 1, buf_start);
+    section_path := cur_section;
+    RETURN NEXT;
+  END IF;
+END;
+$$;
+
 -- Recreate process_pending_documents to use simple_chunk_text
 CREATE OR REPLACE FUNCTION app.process_pending_documents()
 RETURNS int
@@ -236,38 +563,37 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
   v_count int := 0;
-  v_model text := app.embedding_model();
-  v_api_key text := NULLIF(current_setting('ai.openai_api_key', true), '');
+  v_mode  text := app.chunking_mode();
 BEGIN
-  -- Insert chunks for docs lacking any
-  WITH new_docs AS (
-    SELECT d.id, d.content_text
-    FROM app.documents d
-    LEFT JOIN app.doc_chunks c ON c.doc_id = d.id
-    WHERE c.doc_id IS NULL
-  ), ins AS (
-    INSERT INTO app.doc_chunks (doc_id, seq, chunk)
-    SELECT nd.id, c.seq, c.chunk
+  -- Insert chunks for docs lacking any using selected chunker
+  IF v_mode = 'llm' THEN
+    WITH new_docs AS (
+      SELECT d.id, d.content_text
+      FROM app.documents d
+      LEFT JOIN app.doc_chunks c ON c.doc_id = d.id
+      WHERE c.doc_id IS NULL
+    )
+    INSERT INTO app.doc_chunks (doc_id, seq, chunk_text, char_start, char_end, section_path)
+    SELECT nd.id, c.seq, c.chunk, c.char_start, c.char_end, c.section_path
     FROM new_docs nd
-    CROSS JOIN LATERAL app.simple_chunk_text(nd.content_text, 1000, 200) c
-    RETURNING 1
-  )
-  SELECT COALESCE(count(*),0) INTO v_count FROM ins;
-
-  -- Embed missing chunks
-  IF v_api_key IS NOT NULL AND v_api_key <> '' THEN
-    BEGIN
-      UPDATE app.doc_chunks c
-      SET embedding = ai.openai_embed(v_model, c.chunk, api_key=>v_api_key)
-      WHERE c.embedding IS NULL;
-    EXCEPTION WHEN others THEN
-      RAISE NOTICE 'Embedding failed: %', SQLERRM;
-    END;
+    CROSS JOIN LATERAL app.agentic_chunk_llm(nd.content_text, 1400, 400) c;
+    GET DIAGNOSTICS v_count = ROW_COUNT;
   ELSE
-    RAISE NOTICE 'Skipping embedding (no OpenAI API key set)';
+    WITH new_docs AS (
+      SELECT d.id, d.content_text
+      FROM app.documents d
+      LEFT JOIN app.doc_chunks c ON c.doc_id = d.id
+      WHERE c.doc_id IS NULL
+    )
+    INSERT INTO app.doc_chunks (doc_id, seq, chunk_text, char_start, char_end, section_path)
+    SELECT nd.id, c.seq, c.chunk, c.char_start, c.char_end, c.section_path
+    FROM new_docs nd
+    CROSS JOIN LATERAL app.agentic_chunk_text(nd.content_text, 1400, 400) c;
+    GET DIAGNOSTICS v_count = ROW_COUNT;
   END IF;
 
-  RETURN v_count;
+  -- Embeddings are filled asynchronously by pgai vectorizer worker.
+  RETURN COALESCE(v_count, 0);
 END;
 $$;
 

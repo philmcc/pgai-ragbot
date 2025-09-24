@@ -13,6 +13,7 @@ GRANT USAGE ON SCHEMA app TO anon;
 CREATE OR REPLACE FUNCTION app.set_request_context()
 RETURNS void
 LANGUAGE plpgsql
+SECURITY DEFINER
 AS $$
 DECLARE
   v text;
@@ -25,11 +26,8 @@ BEGIN
     hdrs := NULL;
   END;
 
-  -- OpenAI Key
-  v := COALESCE(
-    NULLIF(current_setting('request.header.x-openai-key', true), ''),
-    NULLIF(hdrs->>'x-openai-key', '')
-  );
+  -- OpenAI Key: source from DB secret, not headers
+  SELECT s.value INTO v FROM app.app_secrets s WHERE s.name = 'openai_api_key' LIMIT 1;
   IF v IS NOT NULL AND v <> '' THEN
     PERFORM set_config('ai.openai_api_key', v, true);
   END IF;
