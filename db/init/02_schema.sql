@@ -76,6 +76,18 @@ SELECT id,
        disabled
 FROM ai.vectorizer_status;
 
+-- Worker progress view for UI/observability
+CREATE OR REPLACE VIEW app.v_vectorizer_worker_progress AS
+SELECT vectorizer_id,
+       success_count,
+       error_count,
+       last_success_at,
+       last_success_process_id,
+       last_error_at,
+       last_error_message,
+       last_error_process_id
+FROM ai.vectorizer_worker_progress;
+
 -- Secrets/config (store API keys and other small config values)
 -- Note: In production, prefer a managed secret store. This is for demo/local use.
 CREATE TABLE IF NOT EXISTS app.app_secrets (

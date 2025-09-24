@@ -25,12 +25,23 @@
     .bubble { background: #0f1530; border: 1px solid #1e2238; border-radius: 10px; padding: 10px 12px; white-space: pre-wrap; }
     .footer { border-top: 1px solid #1e2238; padding: 12px 16px; }
     a { color: #60a5fa; text-decoration: none; }
+    /* Collapsible cards */
+    .card-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+    .collapseBtn { background:#29304d; color:#e6e6eb; border:0; border-radius:6px; padding:4px 8px; font-size:12px; }
+    .card.collapsed > :not(.card-header) { display: none; }
+    /* Modal dialog */
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: none; align-items: center; justify-content: center; z-index: 1000; }
+    .modal { background:#0f1530; border:1px solid #1e2238; border-radius:10px; width:min(480px, 90%); padding:16px; }
+    .modal-title { font-weight:600; margin-bottom:8px; }
+    .modal-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:12px; }
+    .btn-secondary { background:#29304d; }
   </style>
 </head>
 <body>
   <header>
     <h1>Postgres-only RAG Chatbot (pgai + pgvector)</h1>
     <div>
+      <span id="chunkModeBadge" style="background:#29304d;color:#e6e6eb;border-radius:6px;padding:4px 8px;font-size:12px;margin-right:10px;">Chunking: …</span>
       <a href="http://localhost:9001" target="_blank">MinIO Console</a>
       &nbsp;·&nbsp;
       <a href="#" id="ingestNow">Ingest now</a>
@@ -38,42 +49,45 @@
   </header>
   <main>
     <aside>
-      <div class="card">
-        <label>OpenAI API Key</label>
-        <input type="password" id="apiKey" placeholder="sk-..." />
-        <div class="row" style="margin-top:8px;">
-          <button id="saveKey">Save to database</button>
-          <button id="clearKey" style="background:#ef4444;">Clear</button>
-        </div>
-        <p id="keyStatus" style="font-size:12px;color:#9aa4bf;margin-top:8px;">Key status: unknown</p>
-        <p style="font-size:12px;color:#9aa4bf;margin-top:8px;">The key is stored server-side in Postgres (table <code>app.app_secrets</code>) and used by the database for embeddings/chat. The browser does not store or send the key on each request.</p>
-      </div>
-      <div class="card">
-        <label>Models</label>
+      <div class="card" id="card-models">
+        <div class="card-header"><label>Models</label><button class="collapseBtn" data-target="card-models">Collapse</button></div>
         <input type="text" id="embedModel" placeholder="text-embedding-3-small" />
         <input type="text" id="chatModel" placeholder="gpt-4o-mini" style="margin-top:8px;"/>
         <button id="saveModels" style="margin-top:8px;">Save Models</button>
         <p style="font-size:12px;color:#9aa4bf;margin-top:8px;">Sent via headers X-Embedding-Model and X-Chat-Model.</p>
       </div>
-      <div class="card">
-        <label>Ingest status</label>
+      <div class="card" id="card-ingest">
+        <div class="card-header"><label>Ingest status</label><button class="collapseBtn" data-target="card-ingest">Collapse</button></div>
         <pre id="status" style="white-space:pre-wrap"></pre>
         <button id="refreshStatus">Refresh</button>
       </div>
-      <div class="card">
-        <label>Vectorizer status</label>
+      <div class="card" id="card-embed">
+        <div class="card-header"><label>Embedding progress</label><button class="collapseBtn" data-target="card-embed">Collapse</button></div>
+        <div id="embedProgressContainer" style="background:#0b1020;border:1px solid #29304d;border-radius:8px;height:16px;overflow:hidden;">
+          <div id="embedProgress" style="background:#22c55e;height:100%;width:0%;transition:width .3s ease"></div>
+        </div>
+        <div id="embedProgressText" style="font-size:12px;color:#9aa4bf;margin-top:6px;">0 / 0 (0%)</div>
+      </div>
+      <div class="card" id="card-vec-status">
+        <div class="card-header"><label>Vectorizer status</label><button class="collapseBtn" data-target="card-vec-status">Collapse</button></div>
         <pre id="vecStatus" style="white-space:pre-wrap"></pre>
         <button id="refreshVec">Refresh</button>
       </div>
-      <div class="card">
-        <label>Documents</label>
+      <div class="card" id="card-vec-worker">
+        <div class="card-header"><label>Vectorizer progress</label><button class="collapseBtn" data-target="card-vec-worker">Collapse</button></div>
+        <pre id="vecWorker" style="white-space:pre-wrap"></pre>
+        <button id="refreshVecWorker">Refresh</button>
+      </div>
+      <div class="card" id="card-docs">
+        <div class="card-header"><label>Documents</label><button class="collapseBtn" data-target="card-docs">Collapse</button></div>
         <div class="row" style="margin-bottom:8px;">
           <button id="listDocs">List documents</button>
+          <button id="deleteAllDocs" style="background:#ef4444">Delete all</button>
         </div>
-        <pre id="docsList" style="white-space:pre-wrap; max-height:200px; overflow:auto;"></pre>
+        <div id="docsList" style="max-height:200px; overflow:auto;"></div>
       </div>
-      <div class="card">
-        <label>Debug retrieval</label>
+      <div class="card" id="card-debug">
+        <div class="card-header"><label>Debug retrieval</label><button class="collapseBtn" data-target="card-debug">Collapse</button></div>
         <div class="row" style="margin-bottom:8px;">
           <input type="checkbox" id="showChunks" />
           <span style="font-size:12px;color:#9aa4bf;">Show retrieved chunks</span>
@@ -102,6 +116,14 @@
       </div>
     </section>
   </main>
-  <script src="./main.js"></script>
+  <!-- Modal overlay -->
+  <div id="modalOverlay" class="modal-overlay" role="dialog" aria-modal="true" aria-hidden="true">
+    <div class="modal">
+      <div class="modal-title" id="modalTitle"></div>
+      <div class="modal-body"><pre id="modalMessage" style="white-space:pre-wrap"></pre></div>
+      <div class="modal-actions" id="modalActions"></div>
+    </div>
+  </div>
+  <script src="./main.js?v=6"></script>
 </body>
 </html>

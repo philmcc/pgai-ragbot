@@ -47,6 +47,25 @@ DECLARE
   v_model text := app.chat_model();
   v_api_key text := NULLIF(current_setting('ai.openai_api_key', true), '');
 BEGIN
+  -- Intent: If the user is asking to list documents/files, return a complete deterministic list.
+  -- Use broad, case-insensitive regex to catch common phrasings.
+  IF p_query ~* '(list|show|which|what).*(document|documents|doc|docs|file|files)'
+     OR p_query ~* '(document|documents|doc|docs|file|files).*(do you have|are stored|do you store)'
+  THEN
+    SELECT COALESCE(
+             'The documents I have are:\n\n' || string_agg(
+               format('%s. %s', rn, s3_key),
+               E'\n'
+             ),
+             'I have no documents yet.'
+           )
+    INTO v_resp
+    FROM (
+      SELECT row_number() OVER (ORDER BY created_at DESC) AS rn, s3_key
+      FROM app.documents
+    ) t;
+    RETURN v_resp;
+  END IF;
   SELECT string_agg(
            format('Doc %s (%s) #%s: %s', s.doc_id, d.s3_key, s.seq, s.chunk),
            E'\n\n'
