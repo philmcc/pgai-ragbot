@@ -1,6 +1,6 @@
-# Episode 1 — pg_vectorize + Agentic Chunking (Deep Dive)
+# Episode 2 — pg_vectorize + Agentic Chunking (Deep Dive)
 
-This document details what existed before Episode 1, the limitations we hit, the goals we set, and exactly what we implemented for Part 1/Episode 1. It also includes rollout steps, commands, and references to the specific files and functions that were added or changed.
+This document details what existed before Episode 2, the limitations we hit, the goals we set, and exactly what we implemented. It also includes rollout steps, commands, and references to the specific files and functions that were added or changed.
 
 ## TL;DR
 - Migrated from in-DB, synchronous embeddings to an asynchronous pgai Vectorizer worker.
@@ -10,7 +10,7 @@ This document details what existed before Episode 1, the limitations we hit, the
 
 ---
 
-## Before Episode 1 (Baseline: Episode 0)
+## Before Episode 2 (Baseline: Episode 1)
 Baseline was a Postgres-only RAG stack with:
 - `pgvector` for vector search and `pgai` for embeddings and chat.
 - Ingestion from MinIO via PL/Python (`boto3`), chunking and embedding performed in-DB.
@@ -31,7 +31,7 @@ Key references (baseline):
 
 ---
 
-## Objectives (Episode 1)
+## Objectives (Episode 2)
 From `PLAN.md`:
 - Replace in-DB embedding with pgai Vectorizer worker (async embeddings).
 - Keep S3 sync and background job, but make chunking agentic and embeddings async.
@@ -134,7 +134,7 @@ From `PLAN.md`:
 
 ---
 
-## Rollout Steps (Episode 1)
+## Rollout Steps (Episode 2)
 - Bring up the stack with the new `vectorizer-worker` service:
   ```bash
   docker compose up -d --build
@@ -215,20 +215,20 @@ Smoke tests (from `PLAN.md`):
 ```mermaid
 flowchart LR
   subgraph Client
-    UI[Static Frontend (Nginx)]
+    UI[Static Frontend - Nginx]
   end
   subgraph API
     PGRST[PostgREST]
   end
-  subgraph DB[PostgreSQL (TimescaleDB + pgvector + pgai)]
-    DOCS[(app.documents)]
-    CHUNKS[(app.doc_chunks)]
+  subgraph DB[PostgreSQL: TimescaleDB + pgvector + pgai]
+    DOCS[app.documents]
+    CHUNKS[app.doc_chunks]
     VSTAT[[app.v_vectorizer_status]]
     VWSTAT[[app.v_vectorizer_worker_progress]]
-    FUNCS[[agentic_chunk_text / agentic_chunk_llm / process_pending_documents / chat_rag]]
+    FUNCS[[agentic_chunk_text, agentic_chunk_llm, process_pending_documents, chat_rag]]
   end
   subgraph S3[MinIO]
-    BUCKET[(documents)]
+    BUCKET[documents]
   end
   subgraph Worker
     VEC[timescale/pgai-vectorizer-worker]
@@ -236,7 +236,7 @@ flowchart LR
 
   UI -->|/api/rpc/run_ingest_once| PGRST -->|s3_sync + process| DB
   DB <--> S3
-  DB -->|chunks (no embed)| CHUNKS
+  DB -->|chunks - no embed| CHUNKS
   VEC -->|polls ai.vectorizers| DB
   VEC -->|writes embeddings| CHUNKS
   UI -->|/api/v_ingest_status| PGRST --> DB

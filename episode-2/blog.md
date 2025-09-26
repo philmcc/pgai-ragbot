@@ -1,10 +1,10 @@
-# Episode 1: From In-DB Embeddings to an Agentic, Vectorizer-Powered RAG
+# Episode 2: From In-DB Embeddings to an Agentic, Vectorizer-Powered RAG
 
 A build log and narrative on evolving a Postgres-only RAG into a cleaner, faster, more observable system by introducing pgai’s Vectorizer worker and agentic chunking.
 
 ## Why change a working baseline?
 
-Our Episode 0 baseline proved a point: you can ship a minimal, fully working RAG chatbot using only PostgreSQL plus PostgREST and a static frontend. It chunked text and computed embeddings inside the database using `pgai`, then performed similarity search via `pgvector`, and finally called `ai.openai_chat_complete` to answer questions.
+Our Episode 1 baseline proved a point: you can ship a minimal, fully working RAG chatbot using only PostgreSQL plus PostgREST and a static frontend. It chunked text and computed embeddings inside the database using `pgai`, then performed similarity search via `pgvector`, and finally called `ai.openai_chat_complete` to answer questions.
 
 That baseline was simple—but it carried friction:
 
@@ -13,7 +13,7 @@ That baseline was simple—but it carried friction:
 - Chunking lacked provenance (no precise character offsets or section-paths), which limits future features like citations and UI highlighting.
 - Tying embedding to ingestion increased DB load and slowed end-to-end processing.
 
-Episode 1 set out to address these pain points without breaking the API or the user experience.
+Episode 2 set out to address these pain points without breaking the API or the user experience.
 
 ## The goal
 
@@ -32,14 +32,14 @@ Episode 1 set out to address these pain points without breaking the API or the u
 - Centralized OpenAI key management with a tiny secrets table (`app.app_secrets`) and helper RPCs. A small script syncs the key into `.env` for containers when needed.
 - Left the RAG API alone (`app.chat_rag`) but updated it to read from the new `chunk_text` column.
 
-## Architecture (Episode 1)
+## Architecture (Episode 2)
 
 - Documents land in MinIO.
 - A job (or a UI click) triggers `app.s3_sync_documents()` and then `app.process_pending_documents()`.
 - The new chunkers write chunks into `app.doc_chunks` (with no embeddings). The Vectorizer worker fills embeddings later.
 - `app.search_chunks()` and `app.chat_rag()` continue to work unchanged from the outside.
 
-See `episode-1/architecture.mmd` for the Mermaid diagram and ideas below for rendering options.
+See `episode-2/architecture.mmd` for the Mermaid diagram and ideas below for rendering options.
 
 Embedded Mermaid diagram (renders in GitHub/VS Code and many docs tools):
 
@@ -76,7 +76,7 @@ flowchart LR
   UI -->|/api/rpc/chat_rag| PGRST -->|RAG| DB
 ```
 
-Static image (if generated): ![Episode 1 Architecture](./architecture.svg)
+Static image (if generated): ![Episode 2 Architecture](./architecture.svg)
 
 ## Key decisions and trade-offs
 
@@ -156,4 +156,4 @@ make status
 
 ## Closing thoughts
 
-Episode 1 keeps the spirit of the baseline (Postgres-first) while making it more maintainable and production-friendly. By separating concerns—chunking in SQL, embeddings via a worker, chat via `pgai`—we get a cleaner architecture that scales with less ceremony and better observability.
+Episode 2 keeps the spirit of the baseline (Postgres-first) while making it more maintainable and production-friendly. By separating concerns—chunking in SQL, embeddings via a worker, chat via `pgai`—we get a cleaner architecture that scales with less ceremony and better observability.
