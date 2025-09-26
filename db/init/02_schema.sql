@@ -34,6 +34,51 @@ CREATE TABLE IF NOT EXISTS doc_chunks (
 CREATE INDEX IF NOT EXISTS doc_chunks_embedding_ivfflat
   ON doc_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists=100);
 
+-- Lexical search support (hybrid search): tsvector column + GIN index + trigger
+-- These are idempotent and safe to run on existing databases.
+ALTER TABLE app.doc_chunks
+  ADD COLUMN IF NOT EXISTS lexeme tsvector;
+
+-- Backfill existing rows (no-op on fresh DB)
+UPDATE app.doc_chunks
+SET lexeme = to_tsvector('english', COALESCE(chunk_text, ''))
+WHERE lexeme IS NULL;
+
+-- Maintain lexeme on insert/update
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'app' AND p.proname = 'trg_update_doc_chunks_lexeme'
+  ) THEN
+    CREATE OR REPLACE FUNCTION app.trg_update_doc_chunks_lexeme()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      NEW.lexeme := to_tsvector('english', COALESCE(NEW.chunk_text, ''));
+      RETURN NEW;
+    END;$$;
+  END IF;
+  -- Create trigger if missing
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger t
+    JOIN pg_class c ON c.oid = t.tgrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE t.tgname = 'trg_update_doc_chunks_lexeme'
+      AND n.nspname = 'app'
+      AND c.relname = 'doc_chunks'
+  ) THEN
+    CREATE TRIGGER trg_update_doc_chunks_lexeme
+      BEFORE INSERT OR UPDATE OF chunk_text ON app.doc_chunks
+      FOR EACH ROW EXECUTE FUNCTION app.trg_update_doc_chunks_lexeme();
+  END IF;
+EXCEPTION WHEN others THEN
+  RAISE NOTICE 'lexeme trigger may already exist: %', SQLERRM;
+END$$;
+
+-- GIN index for fast lexical search
+CREATE INDEX IF NOT EXISTS doc_chunks_lexeme_gin ON app.doc_chunks USING GIN (lexeme);
+
 -- Helper view to show ingestion and embedding status
 CREATE OR REPLACE VIEW v_ingest_status AS
 SELECT d.id, d.s3_bucket, d.s3_key,

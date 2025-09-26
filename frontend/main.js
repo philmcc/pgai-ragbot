@@ -5,6 +5,57 @@ function headers() {
   return { 'Content-Type': 'application/json' };
 }
 
+// Preview retrieval results using hybrid search RPC
+async function debugSearch(q, k, th) {
+  const pre = document.getElementById('retrievalDebug');
+  if (!pre) return;
+  pre.textContent = 'Loading...';
+  try {
+    // Call semantic search RPC (reverted)
+    const res = await fetch(`${API}/rpc/search_chunks`, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({ p_query: q, k })
+    });
+    if (!res.ok) {
+      let t = '';
+      try { t = await res.text(); } catch (_) {}
+      throw new Error(`HTTP ${res.status} ${t}`);
+    }
+    const rows = await res.json();
+
+    // Optional threshold: results return a fused distance (lower is better)
+    let items = Array.isArray(rows) ? rows : [];
+    if (!isNaN(th) && th !== null && th !== undefined) {
+      const thr = Number(th);
+      if (!Number.isNaN(thr)) items = items.filter(r => typeof r.distance === 'number' && r.distance <= thr);
+    }
+    // Sort by ascending distance
+    items.sort((a, b) => (a.distance ?? 0) - (b.distance ?? 0));
+
+    // Fetch doc list to annotate filenames
+    let docMap = {};
+    try {
+      let ld = await fetch(`${API}/rpc/list_documents`);
+      if (ld.ok) {
+        const arr = await ld.json();
+        (Array.isArray(arr) ? arr : []).forEach(d => { docMap[d.id] = d.s3_key; });
+      }
+    } catch (_) {}
+
+    // Render
+    const lines = items.map((r, i) => {
+      const key = docMap[r.doc_id] || `doc ${r.doc_id}`;
+      const chunk = (r.chunk || '').replace(/\s+/g, ' ').slice(0, 240);
+      const dist = (typeof r.distance === 'number') ? r.distance.toFixed(4) : String(r.distance);
+      return `${i+1}. ${key}  #${r.seq}  dist=${dist}\n   ${chunk}`;
+    });
+    pre.textContent = lines.join('\n\n') || '(no results)';
+  } catch (e) {
+    pre.textContent = `Error: ${e?.message || e}`;
+  }
+}
+
 // Promise-based confirm modal
 function showConfirm(title, message, confirmText = 'Yes', cancelText = 'Cancel') {
   return new Promise((resolve) => {
@@ -353,15 +404,91 @@ function init() {
     if (q) debugSearch(q, k, th);
   };
 
+  // Weights sliders
+  const wLex = document.getElementById('wLex');
+  const wSem = document.getElementById('wSem');
+  const wLexVal = document.getElementById('wLexVal');
+  const wSemVal = document.getElementById('wSemVal');
+  const updateWeightsUI = () => {
+    if (wLexVal && wLex) wLexVal.textContent = Number(wLex.value).toFixed(2);
+    if (wSemVal && wSem) wSemVal.textContent = Number(wSem.value).toFixed(2);
+  };
+  updateWeightsUI();
+  const onWeightChange = () => {
+    updateWeightsUI();
+    const show = document.getElementById('showChunks')?.checked;
+    if (!show) return;
+    const q = document.getElementById('question').value.trim();
+    const k = parseInt(document.getElementById('topK').value, 10) || 5;
+    const th = parseFloat(document.getElementById('threshold')?.value);
+    if (q) debugSearch(q, k, th);
+  };
+  if (wLex) wLex.addEventListener('input', onWeightChange);
+  if (wSem) wSem.addEventListener('input', onWeightChange);
+
   fetchStatus();
   listDocs();
   fetchVectorizerStatus();
   fetchVectorizerWorker();
   fetchChunkingMode();
 
+  // Attach JS tooltips for reliability (works in browsers with finicky :hover)
+  (function attachTooltips(){
+    const targets = document.querySelectorAll('.help, .has-tip');
+    let tipEl = null;
+    const show = (el, evt) => {
+      const msg = el.getAttribute('data-tip') || el.getAttribute('title');
+      if (!msg) return;
+      tipEl = document.createElement('div');
+      tipEl.textContent = msg;
+      Object.assign(tipEl.style, {
+        position: 'fixed',
+        left: '0px', top: '0px',
+        maxWidth: '320px',
+        background: '#0f1530',
+        color: '#e6e6eb',
+        border: '1px solid #1e2238',
+        borderRadius: '6px',
+        padding: '8px 10px',
+        zIndex: '3000',
+        boxShadow: '0 6px 18px rgba(0,0,0,0.35)',
+        pointerEvents: 'none',
+        fontSize: '12px',
+        lineHeight: '1.25'
+      });
+      document.body.appendChild(tipEl);
+      move(evt);
+    };
+    const hide = () => { if (tipEl && tipEl.parentNode) { tipEl.parentNode.removeChild(tipEl); } tipEl = null; };
+    const move = (evt) => {
+      if (!tipEl) return;
+      const margin = 12;
+      let x = evt.clientX + margin;
+      let y = evt.clientY + margin;
+      const rect = tipEl.getBoundingClientRect();
+      const vw = window.innerWidth, vh = window.innerHeight;
+      if (x + rect.width + 8 > vw) x = Math.max(8, evt.clientX - rect.width - margin);
+      if (y + rect.height + 8 > vh) y = Math.max(8, evt.clientY - rect.height - margin);
+      tipEl.style.left = x + 'px';
+      tipEl.style.top  = y + 'px';
+    };
+    targets.forEach(el => {
+      el.addEventListener('mouseenter', (e) => show(el, e));
+      el.addEventListener('mouseleave', hide);
+      el.addEventListener('mousemove', move);
+      // Prevent native title from hijacking
+      // (keep data-tip as the source of truth)
+      if (el.hasAttribute('title')) {
+        el.setAttribute('data-tip', el.getAttribute('data-tip') || el.getAttribute('title'));
+        el.removeAttribute('title');
+      }
+    });
+  })();
+
   // (no persistent notices)
 
   // Collapsible cards
+  // 1) Bind handlers
   document.querySelectorAll('.collapseBtn').forEach(btn => {
     btn.addEventListener('click', () => {
       const id = btn.getAttribute('data-target');
@@ -370,6 +497,16 @@ function init() {
       const collapsed = card.classList.toggle('collapsed');
       btn.textContent = collapsed ? 'Expand' : 'Collapse';
     });
+  });
+  // 2) Collapse all by default on first load
+  document.querySelectorAll('.collapseBtn').forEach(btn => {
+    const id = btn.getAttribute('data-target');
+    const card = document.getElementById(id);
+    if (!card) return;
+    if (!card.classList.contains('collapsed')) {
+      card.classList.add('collapsed');
+    }
+    btn.textContent = 'Expand';
   });
 }
 
