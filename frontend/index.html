@@ -35,6 +35,11 @@
     .modal-title { font-weight:600; margin-bottom:8px; }
     .modal-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:12px; }
     .btn-secondary { background:#29304d; }
+    /* Inline help tooltip */
+    .help { display:inline-flex; align-items:center; justify-content:center; width:16px; height:16px; border-radius:50%; background:#29304d; border:1px solid #60a5fa; color:#e6e6eb; font-size:11px; margin-left:6px; cursor:help; position:relative; }
+    .help::before { content:'?'; line-height:1; }
+    /* Tooltip on any element (labels/inputs) */
+    .has-tip { position: relative; cursor: help; }
   </style>
 </head>
 <body>
@@ -96,6 +101,19 @@
           <input type="text" id="threshold" value="0.8" style="width:100px;" />
           <span style="font-size:12px;color:#9aa4bf;">Threshold (chat uses default 0.8)</span>
         </div>
+        <div class="row" style="margin-bottom:8px;align-items:center;gap:10px;">
+          <label for="wLex" class="has-tip" data-tip="Weight of lexical (BM25/Postgres full‑text search) in the hybrid score. Higher = favor exact term matches, IDs, acronyms." style="font-size:12px;color:#9aa4bf;min-width:120px;">Lexical weight</label>
+          <span class="help" data-tip="Weight of lexical (BM25/Postgres full‑text search) in the hybrid score. Higher = favor exact term matches, IDs, acronyms."></span>
+          <input type="range" id="wLex" min="0" max="1" step="0.05" value="0.5" class="has-tip" title="Weight of lexical (BM25/FTS) signal in hybrid fusion. Higher = more literal matching." style="flex:1;" />
+          <span id="wLexVal" style="width:46px;text-align:right;">0.50</span>
+        </div>
+        <div class="row" style="margin-bottom:8px;align-items:center;gap:10px;">
+          <label for="wSem" class="has-tip" data-tip="Weight of semantic (pgvector embeddings) in the hybrid score. Higher = favor paraphrases/synonyms and overall meaning." style="font-size:12px;color:#9aa4bf;min-width:120px;">Semantic weight</label>
+          <span class="help" data-tip="Weight of semantic (pgvector embeddings) in the hybrid score. Higher = favor paraphrases/synonyms and overall meaning."></span>
+          <input type="range" id="wSem" min="0" max="1" step="0.05" value="0.5" class="has-tip" title="Weight of semantic (embedding) signal in hybrid fusion. Higher = more paraphrase-friendly." style="flex:1;" />
+          <span id="wSemVal" style="width:46px;text-align:right;">0.50</span>
+        </div>
+        <p style="font-size:12px;color:#9aa4bf;margin:4px 0 8px 0;">Final score = <b>w_lex</b> × lexical + <b>w_sem</b> × semantic. Results are sorted by this fused score.</p>
         <pre id="retrievalDebug" style="white-space:pre-wrap; max-height:240px; overflow:auto;"></pre>
       </div>
       <div class="card">
@@ -109,9 +127,10 @@
       <div class="footer">
         <label>Ask a question</label>
         <textarea id="question" placeholder="Ask about your documents..."></textarea>
-        <div class="row" style="margin-top:8px;">
+        <div class="row" style="margin-top:8px; align-items:center; gap:8px;">
           <button id="askBtn">Ask</button>
-          <input type="text" id="topK" value="5" style="width:80px;" />
+          <input type="text" id="topK" value="5" style="width:80px;" class="has-tip" data-tip="Top‑K results: how many chunks to retrieve before summarizing. Higher increases recall; may add latency and context size." title="Number of chunks to retrieve (top-K). Higher values increase recall but may add latency." />
+          <span class="help" data-tip="Top‑K results: how many chunks to retrieve before summarizing. Higher increases recall; may add latency and context size."></span>
         </div>
       </div>
     </section>
@@ -124,6 +143,6 @@
       <div class="modal-actions" id="modalActions"></div>
     </div>
   </div>
-  <script src="./main.js?v=6"></script>
+  <script src="./main.js?v=8"></script>
 </body>
 </html>
