@@ -1,4 +1,4 @@
-# Part 1 Plan — pg_vectorize + Agentic Chunking
+# Episode 2 Plan — pg_vectorize + Agentic Chunking
 
 This document captures the concrete steps to upgrade the current Postgres-only RAG chatbot to use the pgai Vectorizer (pg_vectorize) for automatic embeddings from S3/MinIO and to add an agentic chunking pipeline. Each step is independent and can be executed incrementally.
 
@@ -48,7 +48,7 @@ This document captures the concrete steps to upgrade the current Postgres-only R
     SELECT ai.create_vectorizer(
       'app.doc_chunks'::regclass,
       if_not_exists => true,
-      loading      => ai.loading_column('chunk'),
+      loading      => ai.loading_column('chunk_text'),
       chunking     => ai.chunking_none(),
       embedding    => ai.embedding_openai(model=>'text-embedding-3-small', dimensions=>'1536'),
       destination  => ai.destination_column('embedding'),
