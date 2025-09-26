@@ -1,0 +1,30 @@
+flowchart LR
+  subgraph Client
+    UI[Static Frontend - Nginx]
+  end
+  subgraph API
+    PGRST[PostgREST]
+  end
+  subgraph DB[PostgreSQL: TimescaleDB + pgvector + pgai]
+    DOCS[app.documents]
+    CHUNKS[app.doc_chunks]
+    VSTAT[[app.v_vectorizer_status]]
+    VWSTAT[[app.v_vectorizer_worker_progress]]
+    FUNCS[[agentic_chunk_text, agentic_chunk_llm, process_pending_documents, chat_rag]]
+  end
+  subgraph S3[MinIO]
+    BUCKET[documents]
+  end
+  subgraph Worker
+    VEC[timescale/pgai-vectorizer-worker]
+  end
+
+  UI -->|/api/rpc/run_ingest_once| PGRST -->|s3_sync + process| DB
+  DB <--> S3
+  DB -->|chunks - no embed| CHUNKS
+  VEC -->|polls ai.vectorizers| DB
+  VEC -->|writes embeddings| CHUNKS
+  UI -->|/api/v_ingest_status| PGRST --> DB
+  UI -->|/api/v_vectorizer_status| PGRST --> DB
+  UI -->|/api/v_vectorizer_worker_progress| PGRST --> DB
+  UI -->|/api/rpc/chat_rag| PGRST -->|RAG| DB
