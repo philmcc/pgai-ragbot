@@ -1,3 +1,70 @@
+  // Load & apply persisted retrieval settings once DOM is ready
+  const saved = JSON.parse(localStorage.getItem('retrieval_settings') || '{}');
+  const retrievalMode = document.getElementById('retrievalMode');
+  const pinSem = document.getElementById('pinSem');
+  const smartChk = document.getElementById('smartWeight');
+  const wLexEl = document.getElementById('wLex');
+  const wSemEl = document.getElementById('wSem');
+  const DEF = { mode: 'semantic', pin: 3, smart: true, wLex: 0.3, wSem: 0.7 };
+  if (retrievalMode) retrievalMode.value = saved.mode || DEF.mode;
+  if (pinSem) pinSem.value = (Number.isFinite(saved.pin) ? saved.pin : DEF.pin);
+  if (smartChk) smartChk.checked = (typeof saved.smart === 'boolean') ? saved.smart : DEF.smart;
+  if (wLexEl) wLexEl.value = (Number.isFinite(saved.wLex) ? saved.wLex : DEF.wLex);
+  if (wSemEl) wSemEl.value = (Number.isFinite(saved.wSem) ? saved.wSem : DEF.wSem);
+
+  const persist = () => {
+    const toSave = {
+      mode: (retrievalMode?.value || DEF.mode),
+      pin: parseInt(pinSem?.value ?? DEF.pin, 10) || DEF.pin,
+      smart: !!smartChk?.checked,
+      wLex: Number(wLexEl?.value ?? DEF.wLex),
+      wSem: Number(wSemEl?.value ?? DEF.wSem),
+    };
+    localStorage.setItem('retrieval_settings', JSON.stringify(toSave));
+  };
+
+  retrievalMode?.addEventListener('change', () => { persist(); updateEffectiveNote(retrievalMode.value, Number(wLexEl?.value), Number(wSemEl?.value), !!smartChk?.checked); });
+  pinSem?.addEventListener('change', () => { persist(); });
+  smartChk?.addEventListener('change', () => { persist(); updateEffectiveNote(retrievalMode?.value, Number(wLexEl?.value), Number(wSemEl?.value), !!smartChk?.checked); });
+// Compute smart weights for a query; base weights are used as a starting point
+function computeSmartWeights(q, base = { baseLex: 0.3, baseSem: 0.7 }) {
+  const text = (q || '').trim();
+  const tokens = text.split(/\s+/).filter(Boolean);
+  const isShort = tokens.length > 0 && tokens.length <= 6;
+  const hasDigits = /\d/.test(text);
+  const hasAcronym = /\b[A-Z]{2,}\b/.test(text);
+  const looksLikeCode = /[_#\-\.]/.test(text);
+
+  let wLex = Number(base.baseLex ?? 0.3);
+  let wSem = Number(base.baseSem ?? 0.7);
+
+  if (isShort) { wLex += 0.20; wSem -= 0.20; }
+  if (hasDigits) { wLex += 0.10; wSem -= 0.10; }
+  if (hasAcronym) { wLex += 0.10; wSem -= 0.10; }
+  if (looksLikeCode) { wLex += 0.05; wSem -= 0.05; }
+
+  // Clamp and renormalize to sum to 1
+  wLex = Math.max(0, Math.min(1, wLex));
+  wSem = Math.max(0, Math.min(1, wSem));
+  const sum = wLex + wSem;
+  if (sum === 0) { wLex = 0.3; wSem = 0.7; }
+  else { wLex = wLex / sum; wSem = wSem / sum; }
+
+  return { wLex, wSem };
+}
+// Update the "Effective weights" note below sliders
+function updateEffectiveNote(mode, wLex, wSem, smart) {
+  const el = document.getElementById('wEffNote');
+  if (!el) return;
+  if ((mode || 'semantic') !== 'hybrid') {
+    el.textContent = 'Semantic mode: weights are not used';
+    return;
+  }
+  const l = (Number(wLex) || 0).toFixed(2);
+  const s = (Number(wSem) || 0).toFixed(2);
+  el.textContent = smart ? `Effective weights (smart): lex=${l}, sem=${s}` : `Effective weights: lex=${l}, sem=${s}`;
+}
+
 const API = '/api';
 
 function headers() {
@@ -5,17 +72,31 @@ function headers() {
   return { 'Content-Type': 'application/json' };
 }
 
-// Preview retrieval results using hybrid search RPC
+// Preview retrieval results using selected retrieval mode
 async function debugSearch(q, k, th) {
   const pre = document.getElementById('retrievalDebug');
   if (!pre) return;
   pre.textContent = 'Loading...';
   try {
-    // Call semantic search RPC (reverted)
-    const res = await fetch(`${API}/rpc/search_chunks`, {
+    const mode = (document.getElementById('retrievalMode')?.value || 'semantic').toLowerCase();
+    const smart = !!document.getElementById('smartWeight')?.checked;
+    let wLex = Number(document.getElementById('wLex')?.value ?? 0.5);
+    let wSem = Number(document.getElementById('wSem')?.value ?? 0.5);
+    if (mode === 'hybrid' && smart && q) {
+      const { wLex: wl, wSem: ws } = computeSmartWeights(q, { baseLex: wLex, baseSem: wSem });
+      wLex = wl; wSem = ws;
+    }
+    updateEffectiveNote(mode, wLex, wSem, smart);
+    let endpoint = `${API}/rpc/search_chunks`;
+    let body = { p_query: q, k };
+    if (mode === 'hybrid') {
+      endpoint = `${API}/rpc/search_chunks_hybrid`;
+      body = { p_query: q, k, p_w_lex: wLex, p_w_sem: wSem };
+    }
+    const res = await fetch(endpoint, {
       method: 'POST',
       headers: headers(),
-      body: JSON.stringify({ p_query: q, k })
+      body: JSON.stringify(body)
     });
     if (!res.ok) {
       let t = '';
@@ -325,10 +406,20 @@ async function ask() {
     await debugSearch(q, k, th);
   }
 
-  const res = await fetch(`${API}/rpc/chat_rag`, {
+  const mode = (document.getElementById('retrievalMode')?.value || 'semantic').toLowerCase();
+  const smart = !!document.getElementById('smartWeight')?.checked;
+  let wLex = Number(document.getElementById('wLex')?.value ?? 0.5);
+  let wSem = Number(document.getElementById('wSem')?.value ?? 0.5);
+  if (mode === 'hybrid' && smart && q) {
+    const { wLex: wl, wSem: ws } = computeSmartWeights(q, { baseLex: wLex, baseSem: wSem });
+    wLex = wl; wSem = ws;
+  }
+  updateEffectiveNote(mode, wLex, wSem, smart);
+  const pinSem = parseInt(document.getElementById('pinSem')?.value, 10) || 3;
+  const res = await fetch(`${API}/rpc/chat_rag_opts`, {
     method: 'POST',
     headers: headers(),
-    body: JSON.stringify({ p_query: q, k })
+    body: JSON.stringify({ p_query: q, k, p_mode: mode, p_w_lex: wLex, p_w_sem: wSem, p_pin_sem: pinSem })
   });
   let text;
   const ct = res.headers.get('content-type') || '';
@@ -405,8 +496,8 @@ function init() {
   };
 
   // Weights sliders
-  const wLex = document.getElementById('wLex');
-  const wSem = document.getElementById('wSem');
+  const wLex = wLexEl;
+  const wSem = wSemEl;
   const wLexVal = document.getElementById('wLexVal');
   const wSemVal = document.getElementById('wSemVal');
   const updateWeightsUI = () => {
@@ -416,6 +507,11 @@ function init() {
   updateWeightsUI();
   const onWeightChange = () => {
     updateWeightsUI();
+    // persist on slider change
+    const savedNow = JSON.parse(localStorage.getItem('retrieval_settings') || '{}');
+    const merged = Object.assign({}, savedNow, { wLex: Number(wLex?.value ?? 0.5), wSem: Number(wSem?.value ?? 0.5) });
+    localStorage.setItem('retrieval_settings', JSON.stringify(merged));
+    updateEffectiveNote(retrievalMode?.value || 'semantic', Number(wLex?.value), Number(wSem?.value), !!smartChk?.checked);
     const show = document.getElementById('showChunks')?.checked;
     if (!show) return;
     const q = document.getElementById('question').value.trim();
@@ -431,6 +527,64 @@ function init() {
   fetchVectorizerStatus();
   fetchVectorizerWorker();
   fetchChunkingMode();
+  // Set initial effective note
+  updateEffectiveNote(retrievalMode?.value || 'semantic', Number(wLexEl?.value), Number(wSemEl?.value), !!smartChk?.checked);
+
+  // Sidebar resize logic with persistence
+  const root = document.documentElement;
+  const resizer = document.getElementById('sidebarResizer');
+  const SIDEBAR_KEY = 'sidebar_width_px';
+  const minW = 240, maxW = 600;
+  const applyW = (px) => { root.style.setProperty('--sidebar-w', `${px}px`); };
+  const savedW = parseInt(localStorage.getItem(SIDEBAR_KEY) || '340', 10);
+  applyW(Math.min(maxW, Math.max(minW, savedW)));
+  let dragging = false;
+  let startX = 0;
+  let startW = savedW;
+  const onMove = (e) => {
+    if (!dragging) return;
+    const x = e.touches ? e.touches[0].clientX : e.clientX;
+    const delta = x - startX;
+    let w = Math.min(maxW, Math.max(minW, startW + delta));
+    applyW(w);
+  };
+  const onUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    const styles = getComputedStyle(root);
+    const col = styles.getPropertyValue('--sidebar-w').trim().replace('px','');
+    const px = parseInt(col || '340', 10);
+    localStorage.setItem(SIDEBAR_KEY, String(px));
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', onUp);
+    window.removeEventListener('touchmove', onMove);
+    window.removeEventListener('touchend', onUp);
+  };
+  const onDown = (e) => {
+    dragging = true;
+    startX = e.touches ? e.touches[0].clientX : e.clientX;
+    startW = parseInt((getComputedStyle(root).getPropertyValue('--sidebar-w') || '340px').replace('px',''),10);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    window.addEventListener('touchmove', onMove, { passive:false });
+    window.addEventListener('touchend', onUp);
+    e.preventDefault();
+  };
+  if (resizer) {
+    resizer.addEventListener('mousedown', onDown);
+    resizer.addEventListener('touchstart', onDown, { passive:false });
+    resizer.addEventListener('keydown', (e) => {
+      const step = (e.shiftKey ? 20 : 10);
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        let cur = parseInt((getComputedStyle(root).getPropertyValue('--sidebar-w') || '340px').replace('px',''),10);
+        cur += (e.key === 'ArrowLeft' ? -step : step);
+        cur = Math.min(maxW, Math.max(minW, cur));
+        applyW(cur);
+        localStorage.setItem(SIDEBAR_KEY, String(cur));
+        e.preventDefault();
+      }
+    });
+  }
 
   // Attach JS tooltips for reliability (works in browsers with finicky :hover)
   (function attachTooltips(){
