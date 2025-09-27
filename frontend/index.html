@@ -8,7 +8,7 @@
     body { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background: #0b1020; color: #e6e6eb; }
     header { padding: 16px 24px; border-bottom: 1px solid #1e2238; display: flex; align-items: center; justify-content: space-between; }
     header h1 { margin: 0; font-size: 18px; }
-    main { display: grid; grid-template-columns: 340px 1fr; gap: 0; height: calc(100vh - 64px); }
+    main { display: grid; grid-template-columns: var(--sidebar-w, 340px) 6px 1fr; gap: 0; height: calc(100vh - 64px); }
     aside { border-right: 1px solid #1e2238; padding: 16px; overflow-y: auto; }
     section { display: flex; flex-direction: column; height: 100%; }
     .card { background: #0f1530; border: 1px solid #1e2238; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
@@ -40,6 +40,9 @@
     .help::before { content:'?'; line-height:1; }
     /* Tooltip on any element (labels/inputs) */
     .has-tip { position: relative; cursor: help; }
+    /* Resizer */
+    .resizer { background: #0b1020; border-left: 1px solid #1e2238; border-right: 1px solid #1e2238; cursor: col-resize; }
+    .resizer:hover { background: #12193a; }
   </style>
 </head>
 <body>
@@ -60,6 +63,27 @@
         <input type="text" id="chatModel" placeholder="gpt-4o-mini" style="margin-top:8px;"/>
         <button id="saveModels" style="margin-top:8px;">Save Models</button>
         <p style="font-size:12px;color:#9aa4bf;margin-top:8px;">Sent via headers X-Embedding-Model and X-Chat-Model.</p>
+      </div>
+      <div class="card" id="card-retrieval">
+        <div class="card-header"><label>Retrieval options</label><button class="collapseBtn" data-target="card-retrieval">Collapse</button></div>
+        <div class="row" style="margin-bottom:8px;align-items:center;gap:8px;">
+          <label for="retrievalMode" class="has-tip" data-tip="Choose retrieval mode: Semantic (original) or Hybrid (lexical+semantic). Hybrid pins top semantic hits to avoid regressions." style="margin:0;">Mode</label>
+          <select id="retrievalMode" class="has-tip" data-tip="Choose retrieval mode: Semantic (original) or Hybrid (lexical+semantic).">
+            <option value="semantic" selected>Semantic (original)</option>
+            <option value="hybrid">Hybrid (lexical + semantic)</option>
+          </select>
+        </div>
+        <div class="row" style="margin-bottom:8px;align-items:center;gap:8px;">
+          <label for="pinSem" class="has-tip" data-tip="Pin top semantic hits to protect strong matches. These are always included before hybrid results.">Pin semantic</label>
+          <input type="number" id="pinSem" value="3" min="0" max="10" style="width:80px;" />
+          <span class="help" data-tip="Number of top semantic chunks that will be pinned so hybrid cannot demote them."></span>
+        </div>
+        <div class="row" style="margin-bottom:8px;align-items:center;gap:8px;">
+          <label for="smartWeight" class="has-tip" data-tip="When enabled, weights are auto-tuned per query: more lexical for short/acronym/version queries; more semantic for longer natural language questions.">Smart weighting</label>
+          <input type="checkbox" id="smartWeight" checked />
+          <span class="help" data-tip="Auto-bias weights per query. You can still override by disabling this and using the sliders below."></span>
+        </div>
+        <p style="font-size:12px;color:#9aa4bf;margin:0;">Default: Semantic only. Toggle to Hybrid for experiments.</p>
       </div>
       <div class="card" id="card-ingest">
         <div class="card-header"><label>Ingest status</label><button class="collapseBtn" data-target="card-ingest">Collapse</button></div>
@@ -101,17 +125,28 @@
           <input type="text" id="threshold" value="0.8" style="width:100px;" />
           <span style="font-size:12px;color:#9aa4bf;">Threshold (chat uses default 0.8)</span>
         </div>
-        <div class="row" style="margin-bottom:8px;align-items:center;gap:10px;">
-          <label for="wLex" class="has-tip" data-tip="Weight of lexical (BM25/Postgres full‑text search) in the hybrid score. Higher = favor exact term matches, IDs, acronyms." style="font-size:12px;color:#9aa4bf;min-width:120px;">Lexical weight</label>
-          <span class="help" data-tip="Weight of lexical (BM25/Postgres full‑text search) in the hybrid score. Higher = favor exact term matches, IDs, acronyms."></span>
-          <input type="range" id="wLex" min="0" max="1" step="0.05" value="0.5" class="has-tip" title="Weight of lexical (BM25/FTS) signal in hybrid fusion. Higher = more literal matching." style="flex:1;" />
-          <span id="wLexVal" style="width:46px;text-align:right;">0.50</span>
+        <div class="row" style="margin-bottom:8px;align-items:flex-start;gap:10px;">
+          <div style="min-width:120px; display:flex; align-items:center; gap:6px;">
+            <label for="wLex" class="has-tip" data-tip="Weight of lexical (BM25/Postgres full‑text search) in the hybrid score. Higher = favor exact term matches, IDs, acronyms." style="font-size:12px;color:#9aa4bf;">Lexical weight</label>
+            <span class="help" data-tip="Weight of lexical (BM25/Postgres full‑text search) in the hybrid score. Higher = favor exact term matches, IDs, acronyms."></span>
+          </div>
+          <div style="flex:1; display:flex; flex-direction:column; gap:4px;">
+            <input type="range" id="wLex" min="0" max="1" step="0.05" value="0.5" class="has-tip" title="Weight of lexical (BM25/FTS) signal in hybrid fusion. Higher = more literal matching;" />
+            <div id="wLexVal" style="font-size:12px; color:#9aa4bf; text-align:right;">0.50</div>
+          </div>
         </div>
-        <div class="row" style="margin-bottom:8px;align-items:center;gap:10px;">
-          <label for="wSem" class="has-tip" data-tip="Weight of semantic (pgvector embeddings) in the hybrid score. Higher = favor paraphrases/synonyms and overall meaning." style="font-size:12px;color:#9aa4bf;min-width:120px;">Semantic weight</label>
-          <span class="help" data-tip="Weight of semantic (pgvector embeddings) in the hybrid score. Higher = favor paraphrases/synonyms and overall meaning."></span>
-          <input type="range" id="wSem" min="0" max="1" step="0.05" value="0.5" class="has-tip" title="Weight of semantic (embedding) signal in hybrid fusion. Higher = more paraphrase-friendly." style="flex:1;" />
-          <span id="wSemVal" style="width:46px;text-align:right;">0.50</span>
+        <div class="row" style="margin-bottom:8px;align-items:flex-start;gap:10px;">
+          <div style="min-width:120px; display:flex; align-items:center; gap:6px;">
+            <label for="wSem" class="has-tip" data-tip="Weight of semantic (pgvector embeddings) in the hybrid score. Higher = favor paraphrases/synonyms and overall meaning." style="font-size:12px;color:#9aa4bf;">Semantic weight</label>
+            <span class="help" data-tip="Weight of semantic (pgvector embeddings) in the hybrid score. Higher = favor paraphrases/synonyms and overall meaning."></span>
+          </div>
+          <div style="flex:1; display:flex; flex-direction:column; gap:4px;">
+            <input type="range" id="wSem" min="0" max="1" step="0.05" value="0.5" class="has-tip" title="Weight of semantic (embedding) signal in hybrid fusion. Higher = more paraphrase-friendly." />
+            <div id="wSemVal" style="font-size:12px; color:#9aa4bf; text-align:right;">0.50</div>
+          </div>
+        </div>
+        <div id="wEffNote" style="font-size:12px;color:#9aa4bf;margin:-4px 0 6px 0;">
+          Effective weights: lex=0.30, sem=0.70
         </div>
         <p style="font-size:12px;color:#9aa4bf;margin:4px 0 8px 0;">Final score = <b>w_lex</b> × lexical + <b>w_sem</b> × semantic. Results are sorted by this fused score.</p>
         <pre id="retrievalDebug" style="white-space:pre-wrap; max-height:240px; overflow:auto;"></pre>
@@ -121,7 +156,7 @@
         Supported: txt, md, docx, pdf (best effort), csv, json.</p>
       </div>
     </aside>
-
+    <div id="sidebarResizer" class="resizer" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" tabindex="0"></div>
     <section class="chat">
       <div class="messages" id="messages"></div>
       <div class="footer">
@@ -143,6 +178,6 @@
       <div class="modal-actions" id="modalActions"></div>
     </div>
   </div>
-  <script src="./main.js?v=8"></script>
+  <script src="./main.js?v=10"></script>
 </body>
 </html>

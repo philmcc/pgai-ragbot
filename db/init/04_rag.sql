@@ -1,3 +1,105 @@
+-- Chat completion with retrieval options
+CREATE OR REPLACE FUNCTION app.chat_rag_opts(
+  p_query    text,
+  k          int    DEFAULT 5,
+  p_mode     text   DEFAULT 'semantic',  -- 'semantic' or 'hybrid'
+  p_w_lex    float4 DEFAULT 0.5,
+  p_w_sem    float4 DEFAULT 0.5,
+  p_pin_sem  int    DEFAULT 3            -- pin top-N semantic hits to "do no harm"
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_ctx   text;
+  v_resp  text;
+  v_model text := app.chat_model();
+  v_api_key text := NULLIF(current_setting('ai.openai_api_key', true), '');
+  v_mode text := lower(coalesce(p_mode, 'semantic'));
+BEGIN
+  -- Intent: answer deterministic document list questions
+  IF p_query ~* '(list|show|which|what).*(document|documents|doc|docs|file|files)'
+     OR p_query ~* '(document|documents|doc|docs|file|files).*(do you have|are stored|do you store)'
+  THEN
+    SELECT COALESCE(
+             'The documents I have are:\n\n' || string_agg(
+               format('%s. %s', rn, s3_key),
+               E'\n'
+             ),
+             'I have no documents yet.'
+           )
+    INTO v_resp
+    FROM (
+      SELECT row_number() OVER (ORDER BY created_at DESC) AS rn, s3_key
+      FROM app.documents
+    ) t;
+    RETURN v_resp;
+  END IF;
+
+  IF v_mode = 'hybrid' THEN
+    WITH sem_top AS (
+      SELECT * FROM app.search_chunks(p_query, GREATEST(COALESCE(p_pin_sem, 0), 0), NULL)
+    ),
+    hyb_top AS (
+      SELECT * FROM app.search_chunks_hybrid(p_query, k, COALESCE(p_w_lex,0.5), COALESCE(p_w_sem,0.5))
+    ),
+    combined AS (
+      SELECT 0 AS pri, s.doc_id, s.seq, s.chunk, s.distance FROM sem_top s
+      UNION ALL
+      SELECT 1 AS pri, h.doc_id, h.seq, h.chunk, h.distance FROM hyb_top h
+    ),
+    dedup AS (
+      SELECT DISTINCT ON (doc_id, seq) doc_id, seq, chunk, distance, pri
+      FROM combined
+      ORDER BY doc_id, seq, pri ASC, distance ASC
+    ),
+    final AS (
+      SELECT *
+      FROM dedup
+      ORDER BY pri ASC, distance ASC
+      LIMIT k
+    )
+    SELECT string_agg(
+             format('Doc %s (%s) #%s: %s', f.doc_id, d.s3_key, f.seq, f.chunk),
+             E'\n\n'
+           )
+    INTO v_ctx
+    FROM final f
+    JOIN app.documents d ON d.id = f.doc_id;
+  ELSE
+    -- semantic-only (original)
+    SELECT string_agg(
+             format('Doc %s (%s) #%s: %s', s.doc_id, d.s3_key, s.seq, s.chunk),
+             E'\n\n'
+           )
+    INTO v_ctx
+    FROM app.search_chunks(p_query, k, NULL) s
+    JOIN app.documents d ON d.id = s.doc_id;
+  END IF;
+
+  IF v_ctx IS NULL OR v_ctx = '' THEN
+    SELECT string_agg(format('Doc %s: %s', d.id, d.s3_key), E'\n')
+    INTO v_ctx
+    FROM app.documents d;
+    v_ctx := COALESCE(v_ctx, '');
+  END IF;
+
+  SELECT ai.openai_chat_complete(
+    v_model,
+    jsonb_build_array(
+      jsonb_build_object('role','system','content','You are a helpful assistant. Answer using only the provided context. If the answer is not in the context, say you do not know.'),
+      jsonb_build_object('role','user','content', p_query || E'\n\nContext:\n' || v_ctx)
+    ),
+    api_key => v_api_key
+  )->'choices'->0->'message'->>'content'
+  INTO v_resp;
+
+  RETURN v_resp;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION app.chat_rag_opts(text, int, text, float4, float4, int) TO anon;
 -- RAG search + chat functions
 SET search_path = app, public;
 
