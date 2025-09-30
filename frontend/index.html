@@ -18,6 +18,7 @@
     button { background: #3b82f6; color: white; border: 0; padding: 10px 14px; border-radius: 8px; cursor: pointer; font-weight: 600; }
     button:disabled { opacity: 0.6; cursor: not-allowed; }
     .row { display: flex; gap: 8px; align-items: center; }
+    .row.disabled { opacity: 0.4; }
     .chat { flex: 1; display: flex; flex-direction: column; padding: 16px; overflow: hidden; }
     .messages { flex: 1; overflow-y: auto; padding-right: 8px; }
     .msg { margin-bottom: 12px; }
@@ -67,10 +68,12 @@
       <div class="card" id="card-retrieval">
         <div class="card-header"><label>Retrieval options</label><button class="collapseBtn" data-target="card-retrieval">Collapse</button></div>
         <div class="row" style="margin-bottom:8px;align-items:center;gap:8px;">
-          <label for="retrievalMode" class="has-tip" data-tip="Choose retrieval mode: Semantic (original) or Hybrid (lexical+semantic). Hybrid pins top semantic hits to avoid regressions." style="margin:0;">Mode</label>
-          <select id="retrievalMode" class="has-tip" data-tip="Choose retrieval mode: Semantic (original) or Hybrid (lexical+semantic).">
-            <option value="semantic" selected>Semantic (original)</option>
+          <label for="retrievalMode" class="has-tip" data-tip="Choose retrieval mode: Semantic (single stage), Hybrid (lexical+semantic fusion), or rerank variants which add a cross-encoder second stage." style="margin:0;">Mode</label>
+          <select id="retrievalMode" class="has-tip" data-tip="Choose retrieval mode: Semantic (single stage), Hybrid, or two-stage Rerank (semantic/hybrid).">
+            <option value="semantic" selected>Semantic only</option>
             <option value="hybrid">Hybrid (lexical + semantic)</option>
+            <option value="semantic_rerank">Semantic → Rerank</option>
+            <option value="hybrid_rerank">Hybrid → Rerank</option>
           </select>
         </div>
         <div class="row" style="margin-bottom:8px;align-items:center;gap:8px;">
@@ -83,7 +86,16 @@
           <input type="checkbox" id="smartWeight" checked />
           <span class="help" data-tip="Auto-bias weights per query. You can still override by disabling this and using the sliders below."></span>
         </div>
-        <p style="font-size:12px;color:#9aa4bf;margin:0;">Default: Semantic only. Toggle to Hybrid for experiments.</p>
+        <div class="row" style="margin-bottom:8px;align-items:center;gap:8px;">
+          <label for="stageK" class="has-tip" data-tip="First-stage candidate count. Higher feeds more chunks to the reranker.">Stage-K</label>
+          <input type="number" id="stageK" value="60" min="10" max="200" step="5" style="width:90px;" />
+          <span class="help" data-tip="How many chunks to pass from first-stage retrieval into the reranker."></span>
+        </div>
+        <div class="row" style="margin-bottom:8px;align-items:center;gap:8px;">
+          <label for="rerankModel" class="has-tip" data-tip="Cross-encoder model ID served by the reranker service.">Rerank model</label>
+          <input type="text" id="rerankModel" placeholder="BAAI/bge-reranker-base" style="flex:1;" />
+        </div>
+        <p style="font-size:12px;color:#9aa4bf;margin:0;">Semantic/Hybrid modes run single-stage retrieval. Rerank modes add a cross-encoder second stage.</p>
       </div>
       <div class="card" id="card-ingest">
         <div class="card-header"><label>Ingest status</label><button class="collapseBtn" data-target="card-ingest">Collapse</button></div>
@@ -150,6 +162,8 @@
         </div>
         <p style="font-size:12px;color:#9aa4bf;margin:4px 0 8px 0;">Final score = <b>w_lex</b> × lexical + <b>w_sem</b> × semantic. Results are sorted by this fused score.</p>
         <pre id="retrievalDebug" style="white-space:pre-wrap; max-height:240px; overflow:auto;"></pre>
+        <button id="refreshRerankLog" style="margin-top:8px;">Refresh rerank log</button>
+        <pre id="rerankLog" style="white-space:pre-wrap; max-height:200px; overflow:auto; margin-top:6px; border-top:1px solid #1e2238; padding-top:6px;"></pre>
       </div>
       <div class="card">
         <p style="font-size:12px;color:#9aa4bf;">Upload files in the MinIO Console to bucket <b>documents</b>.

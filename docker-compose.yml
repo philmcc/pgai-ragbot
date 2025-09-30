@@ -11,6 +11,7 @@ services:
       - POSTGRES_USER=postgres
       - POSTGRES_DB=pgai
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - RERANK_ENDPOINT=http://reranker:8000/rerank
       - AWS_ACCESS_KEY_ID=minioadmin
       - AWS_SECRET_ACCESS_KEY=minioadmin
       - AWS_DEFAULT_REGION=us-east-1
@@ -104,6 +105,19 @@ services:
       - ./scripts:/scripts:ro
     entrypoint: ["/bin/sh", "/scripts/vectorizer-start.sh"]
 
+  reranker:
+    build: ./reranker
+    container_name: pgai-reranker
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - RERANKER_DEFAULT_MODEL=${RERANKER_DEFAULT_MODEL:-BAAI/bge-reranker-base}
+    ports:
+      - "8001:8000"
+    volumes:
+      - reranker-cache:/root/.cache/huggingface
+
   frontend:
     image: ${NGINX_IMAGE:-nginx:1.27.0-alpine}
     container_name: pgai-frontend
@@ -130,3 +144,4 @@ services:
 
 volumes:
   pgdata:
+  reranker-cache:

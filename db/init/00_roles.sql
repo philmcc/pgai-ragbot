@@ -49,6 +49,15 @@ BEGIN
   IF v IS NOT NULL AND v <> '' THEN
     PERFORM set_config('ai.openai_chat_model', v, true);
   END IF;
+
+  -- Rerank model
+  v := COALESCE(
+    NULLIF(current_setting('request.header.x-rerank-model', true), ''),
+    NULLIF(hdrs->>'x-rerank-model', '')
+  );
+  IF v IS NOT NULL AND v <> '' THEN
+    PERFORM set_config('ai.openai_rerank_model', v, true);
+  END IF;
 END;
 $$;
 

@@ -46,6 +46,10 @@ CREATE OR REPLACE FUNCTION app.chat_model() RETURNS text LANGUAGE sql AS $$
   SELECT COALESCE(NULLIF(current_setting('ai.openai_chat_model', true), ''), 'gpt-4o-mini')
 $$;
 
+CREATE OR REPLACE FUNCTION app.rerank_model() RETURNS text LANGUAGE sql AS $$
+  SELECT COALESCE(NULLIF(current_setting('ai.openai_rerank_model', true), ''), 'BAAI/bge-reranker-base')
+$$;
+
 -- Create PL/Python function to sync documents from MinIO bucket
 CREATE OR REPLACE FUNCTION app.s3_sync_documents(p_bucket text DEFAULT 'documents')
 RETURNS int

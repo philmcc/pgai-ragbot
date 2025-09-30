@@ -34,6 +34,36 @@ CREATE TABLE IF NOT EXISTS doc_chunks (
 CREATE INDEX IF NOT EXISTS doc_chunks_embedding_ivfflat
   ON doc_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists=100);
 
+-- Rerank event log for observability (Episode 4)
+CREATE TABLE IF NOT EXISTS rerank_events (
+  id             bigserial PRIMARY KEY,
+  query          text NOT NULL,
+  doc_id         bigint,
+  seq            int,
+  stage_rank     int,
+  stage_distance float4,
+  rerank_score   float4,
+  rerank_model   text,
+  created_at     timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS rerank_events_created_at_idx
+  ON rerank_events (created_at DESC);
+
+CREATE OR REPLACE VIEW app.v_rerank_events AS
+SELECT id,
+       query,
+       doc_id,
+       seq,
+       stage_rank,
+       stage_distance,
+       rerank_score,
+       rerank_model,
+       created_at
+FROM rerank_events
+ORDER BY created_at DESC
+LIMIT 200;
+
 -- Lexical search support (hybrid search): tsvector column + GIN index + trigger
 -- These are idempotent and safe to run on existing databases.
 ALTER TABLE app.doc_chunks

@@ -5,12 +5,24 @@
   const smartChk = document.getElementById('smartWeight');
   const wLexEl = document.getElementById('wLex');
   const wSemEl = document.getElementById('wSem');
-  const DEF = { mode: 'semantic', pin: 3, smart: true, wLex: 0.3, wSem: 0.7 };
+  const stageKEl = document.getElementById('stageK');
+  const rerankModelEl = document.getElementById('rerankModel');
+  const DEF = {
+    mode: 'semantic',
+    pin: 3,
+    smart: true,
+    wLex: 0.3,
+    wSem: 0.7,
+    stageK: 60,
+    rerankModel: 'BAAI/bge-reranker-base'
+  };
   if (retrievalMode) retrievalMode.value = saved.mode || DEF.mode;
   if (pinSem) pinSem.value = (Number.isFinite(saved.pin) ? saved.pin : DEF.pin);
   if (smartChk) smartChk.checked = (typeof saved.smart === 'boolean') ? saved.smart : DEF.smart;
   if (wLexEl) wLexEl.value = (Number.isFinite(saved.wLex) ? saved.wLex : DEF.wLex);
   if (wSemEl) wSemEl.value = (Number.isFinite(saved.wSem) ? saved.wSem : DEF.wSem);
+  if (stageKEl) stageKEl.value = (Number.isFinite(saved.stageK) ? saved.stageK : DEF.stageK);
+  if (rerankModelEl) rerankModelEl.value = saved.rerankModel || DEF.rerankModel;
 
   const persist = () => {
     const toSave = {
@@ -19,13 +31,35 @@
       smart: !!smartChk?.checked,
       wLex: Number(wLexEl?.value ?? DEF.wLex),
       wSem: Number(wSemEl?.value ?? DEF.wSem),
+      stageK: parseInt(stageKEl?.value ?? DEF.stageK, 10) || DEF.stageK,
+      rerankModel: (rerankModelEl?.value || DEF.rerankModel),
     };
     localStorage.setItem('retrieval_settings', JSON.stringify(toSave));
   };
 
-  retrievalMode?.addEventListener('change', () => { persist(); updateEffectiveNote(retrievalMode.value, Number(wLexEl?.value), Number(wSemEl?.value), !!smartChk?.checked); });
+  retrievalMode?.addEventListener('change', () => {
+    persist();
+    updateEffectiveNote(retrievalMode.value, Number(wLexEl?.value), Number(wSemEl?.value), !!smartChk?.checked);
+    toggleRerankInputs(retrievalMode.value);
+  });
   pinSem?.addEventListener('change', () => { persist(); });
   smartChk?.addEventListener('change', () => { persist(); updateEffectiveNote(retrievalMode?.value, Number(wLexEl?.value), Number(wSemEl?.value), !!smartChk?.checked); });
+  stageKEl?.addEventListener('change', () => { persist(); });
+  rerankModelEl?.addEventListener('change', () => { persist(); });
+
+function toggleRerankInputs(mode) {
+  const show = /rerank/.test(mode || '');
+  if (stageKEl) {
+    stageKEl.disabled = !show;
+    stageKEl.parentElement?.classList?.toggle('disabled', !show);
+  }
+  if (rerankModelEl) {
+    rerankModelEl.disabled = !show;
+    rerankModelEl.parentElement?.classList?.toggle('disabled', !show);
+  }
+}
+
+toggleRerankInputs(retrievalMode?.value || DEF.mode);
 // Compute smart weights for a query; base weights are used as a starting point
 function computeSmartWeights(q, base = { baseLex: 0.3, baseSem: 0.7 }) {
   const text = (q || '').trim();
@@ -82,6 +116,8 @@ async function debugSearch(q, k, th) {
     const smart = !!document.getElementById('smartWeight')?.checked;
     let wLex = Number(document.getElementById('wLex')?.value ?? 0.5);
     let wSem = Number(document.getElementById('wSem')?.value ?? 0.5);
+    const stageK = parseInt(document.getElementById('stageK')?.value, 10) || 60;
+    const rerankModel = document.getElementById('rerankModel')?.value?.trim();
     if (mode === 'hybrid' && smart && q) {
       const { wLex: wl, wSem: ws } = computeSmartWeights(q, { baseLex: wLex, baseSem: wSem });
       wLex = wl; wSem = ws;
@@ -92,6 +128,18 @@ async function debugSearch(q, k, th) {
     if (mode === 'hybrid') {
       endpoint = `${API}/rpc/search_chunks_hybrid`;
       body = { p_query: q, k, p_w_lex: wLex, p_w_sem: wSem };
+    } else if (mode === 'semantic_rerank' || mode === 'hybrid_rerank') {
+      endpoint = `${API}/rpc/search_chunks_rerank`;
+      const stageMode = mode === 'semantic_rerank' ? 'semantic' : 'hybrid';
+      body = {
+        p_query: q,
+        k,
+        p_stage_k: stageK,
+        p_stage_mode: stageMode,
+        p_w_lex: wLex,
+        p_w_sem: wSem,
+        p_rerank_model: rerankModel || null
+      };
     }
     const res = await fetch(endpoint, {
       method: 'POST',
@@ -111,8 +159,11 @@ async function debugSearch(q, k, th) {
       const thr = Number(th);
       if (!Number.isNaN(thr)) items = items.filter(r => typeof r.distance === 'number' && r.distance <= thr);
     }
-    // Sort by ascending distance
-    items.sort((a, b) => (a.distance ?? 0) - (b.distance ?? 0));
+    if (mode === 'semantic_rerank' || mode === 'hybrid_rerank') {
+      items.sort((a, b) => (b.rerank_score ?? -1e6) - (a.rerank_score ?? -1e6));
+    } else {
+      items.sort((a, b) => (a.distance ?? 0) - (b.distance ?? 0));
+    }
 
     // Fetch doc list to annotate filenames
     let docMap = {};
@@ -129,7 +180,10 @@ async function debugSearch(q, k, th) {
       const key = docMap[r.doc_id] || `doc ${r.doc_id}`;
       const chunk = (r.chunk || '').replace(/\s+/g, ' ').slice(0, 240);
       const dist = (typeof r.distance === 'number') ? r.distance.toFixed(4) : String(r.distance);
-      return `${i+1}. ${key}  #${r.seq}  dist=${dist}\n   ${chunk}`;
+      const scorePart = (mode === 'semantic_rerank' || mode === 'hybrid_rerank')
+        ? `score=${(r.rerank_score !== null && r.rerank_score !== undefined) ? Number(r.rerank_score).toFixed(4) : 'n/a'}`
+        : `dist=${dist}`;
+      return `${i+1}. ${key}  #${r.seq}  ${scorePart}\n   ${chunk}`;
     });
     pre.textContent = lines.join('\n\n') || '(no results)';
   } catch (e) {
@@ -410,16 +464,31 @@ async function ask() {
   const smart = !!document.getElementById('smartWeight')?.checked;
   let wLex = Number(document.getElementById('wLex')?.value ?? 0.5);
   let wSem = Number(document.getElementById('wSem')?.value ?? 0.5);
+  const stageK = parseInt(document.getElementById('stageK')?.value, 10) || 60;
+  const rerankModel = document.getElementById('rerankModel')?.value?.trim() || null;
   if (mode === 'hybrid' && smart && q) {
     const { wLex: wl, wSem: ws } = computeSmartWeights(q, { baseLex: wLex, baseSem: wSem });
     wLex = wl; wSem = ws;
   }
   updateEffectiveNote(mode, wLex, wSem, smart);
   const pinSem = parseInt(document.getElementById('pinSem')?.value, 10) || 3;
+  const useRerank = mode === 'semantic_rerank' || mode === 'hybrid_rerank';
+  const stageMode = mode === 'semantic_rerank' ? 'semantic' : (mode === 'hybrid_rerank' ? 'hybrid' : null);
   const res = await fetch(`${API}/rpc/chat_rag_opts`, {
     method: 'POST',
     headers: headers(),
-    body: JSON.stringify({ p_query: q, k, p_mode: mode, p_w_lex: wLex, p_w_sem: wSem, p_pin_sem: pinSem })
+    body: JSON.stringify({
+      p_query: q,
+      k,
+      p_mode: mode,
+      p_w_lex: wLex,
+      p_w_sem: wSem,
+      p_pin_sem: pinSem,
+      p_stage_k: stageK,
+      p_use_rerank: useRerank,
+      p_rerank_stage_mode: stageMode,
+      p_rerank_model: rerankModel
+    })
   });
   let text;
   const ct = res.headers.get('content-type') || '';
@@ -469,6 +538,8 @@ function init() {
   document.getElementById('refreshVec').onclick = fetchVectorizerStatus;
   const refreshVW = document.getElementById('refreshVecWorker');
   if (refreshVW) refreshVW.onclick = fetchVectorizerWorker;
+  const refreshRerankLogBtn = document.getElementById('refreshRerankLog');
+  if (refreshRerankLogBtn) refreshRerankLogBtn.onclick = fetchRerankLog;
   document.getElementById('ingestNow').onclick = (e) => { e.preventDefault(); ingestNow(); };
   const listBtn = document.getElementById('listDocs');
   if (listBtn) listBtn.onclick = listDocs;
@@ -527,6 +598,7 @@ function init() {
   fetchVectorizerStatus();
   fetchVectorizerWorker();
   fetchChunkingMode();
+  fetchRerankLog();
   // Set initial effective note
   updateEffectiveNote(retrievalMode?.value || 'semantic', Number(wLexEl?.value), Number(wSemEl?.value), !!smartChk?.checked);
 
@@ -665,3 +737,26 @@ function init() {
 }
 
 window.addEventListener('DOMContentLoaded', init);
+
+async function fetchRerankLog(limit = 50) {
+  const pre = document.getElementById('rerankLog');
+  if (!pre) return;
+  pre.textContent = 'Loading rerank events...';
+  try {
+    const res = await fetch(`${API}/v_rerank_events?limit=${limit}&order=created_at.desc`);
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error(`HTTP ${res.status} ${txt}`);
+    }
+    const rows = await res.json();
+    const lines = (Array.isArray(rows) ? rows : []).map(r => {
+      const ts = r.created_at ? new Date(r.created_at).toLocaleString() : '';
+      const score = (r.rerank_score !== null && r.rerank_score !== undefined) ? Number(r.rerank_score).toFixed(3) : 'n/a';
+      const dist = (r.stage_distance !== undefined && r.stage_distance !== null) ? Number(r.stage_distance).toFixed(3) : 'n/a';
+      return `${ts}  q="${(r.query || '').slice(0, 48)}" doc=${r.doc_id} seq=${r.seq} score=${score} dist=${dist}`;
+    });
+    pre.textContent = lines.join('\n') || '(no rerank events yet)';
+  } catch (err) {
+    pre.textContent = `Rerank log error: ${err?.message || err}`;
+  }
+}

@@ -1,11 +1,19 @@
+-- Remove legacy overload before redefining with expanded parameters
+DROP FUNCTION IF EXISTS app.chat_rag_opts(text, int);
+DROP FUNCTION IF EXISTS app.chat_rag_opts(text, int, text, float4, float4, int);
+
 -- Chat completion with retrieval options
 CREATE OR REPLACE FUNCTION app.chat_rag_opts(
-  p_query    text,
-  k          int    DEFAULT 5,
-  p_mode     text   DEFAULT 'semantic',  -- 'semantic' or 'hybrid'
-  p_w_lex    float4 DEFAULT 0.5,
-  p_w_sem    float4 DEFAULT 0.5,
-  p_pin_sem  int    DEFAULT 3            -- pin top-N semantic hits to "do no harm"
+  p_query             text,
+  k                   int    DEFAULT 5,
+  p_mode              text   DEFAULT 'semantic',  -- semantic | hybrid | semantic_rerank | hybrid_rerank | rerank
+  p_w_lex             float4 DEFAULT 0.5,
+  p_w_sem             float4 DEFAULT 0.5,
+  p_pin_sem           int    DEFAULT 3,           -- pin top-N semantic hits to "do no harm"
+  p_stage_k           int    DEFAULT NULL,
+  p_use_rerank        boolean DEFAULT false,
+  p_rerank_stage_mode text   DEFAULT NULL,
+  p_rerank_model      text   DEFAULT NULL
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -17,6 +25,12 @@ DECLARE
   v_model text := app.chat_model();
   v_api_key text := NULLIF(current_setting('ai.openai_api_key', true), '');
   v_mode text := lower(coalesce(p_mode, 'semantic'));
+  v_pin_sem int := GREATEST(COALESCE(p_pin_sem, 0), 0);
+  v_stage_k int := COALESCE(p_stage_k, LEAST(200, GREATEST(k * 4, 40)));
+  v_rerank boolean := COALESCE(p_use_rerank, false);
+  v_stage_mode text;
+  v_rerank_stage_mode text;
+  v_rerank_model text := COALESCE(NULLIF(p_rerank_model, ''), app.rerank_model());
 BEGIN
   -- Intent: answer deterministic document list questions
   IF p_query ~* '(list|show|which|what).*(document|documents|doc|docs|file|files)'
@@ -37,7 +51,83 @@ BEGIN
     RETURN v_resp;
   END IF;
 
-  IF v_mode = 'hybrid' THEN
+  IF v_mode IN ('rerank', 'hybrid_rerank', 'semantic_rerank') THEN
+    v_rerank := true;
+  END IF;
+
+  v_stage_mode := CASE
+                    WHEN v_mode IN ('semantic', 'semantic_rerank') THEN 'semantic'
+                    WHEN v_mode = 'hybrid' THEN 'hybrid'
+                    ELSE 'hybrid'
+                  END;
+  v_rerank_stage_mode := lower(coalesce(p_rerank_stage_mode, v_stage_mode));
+
+  IF v_rerank THEN
+    WITH reranked AS (
+      SELECT 1 AS pri,
+             r.doc_id,
+             r.seq,
+             r.chunk,
+             r.distance,
+             r.rerank_score,
+             row_number() OVER (ORDER BY COALESCE(r.rerank_score, -1e9) DESC, r.distance ASC) AS ord
+      FROM app.search_chunks_rerank(
+        p_query,
+        GREATEST(k, 1),
+        v_stage_k,
+        v_rerank_stage_mode,
+        COALESCE(p_w_lex, 0.5),
+        COALESCE(p_w_sem, 0.5),
+        v_rerank_model,
+        NULL::text
+      ) r
+    ), sem_pin AS (
+      SELECT 0 AS pri,
+             s.doc_id,
+             s.seq,
+             s.chunk,
+             s.distance,
+             NULL::float4 AS rerank_score,
+             row_number() OVER (ORDER BY s.distance ASC) AS ord
+      FROM app.search_chunks(p_query, v_pin_sem, NULL) s
+      WHERE v_pin_sem > 0
+    ), combined AS (
+      SELECT * FROM sem_pin
+      UNION ALL
+      SELECT * FROM reranked
+    ), dedup AS (
+      SELECT DISTINCT ON (doc_id, seq)
+             doc_id,
+             seq,
+             chunk,
+             distance,
+             rerank_score,
+             pri,
+             ord
+      FROM combined
+      ORDER BY doc_id, seq, pri, ord
+    ), final AS (
+      SELECT *,
+             CASE
+               WHEN pri = 0 THEN distance::float8
+               ELSE -COALESCE(rerank_score::float8, (1.0 - distance)::float8)
+             END AS sort_key
+      FROM dedup
+      ORDER BY pri, sort_key
+      LIMIT k
+    )
+    SELECT string_agg(
+             'Doc ' || f.doc_id ||
+             ' (' || d.s3_key || ') #' || f.seq ||
+             ' [score=' || to_char(COALESCE(f.rerank_score, 1.0 - f.distance), 'FM999990.000') || ']: ' ||
+             f.chunk,
+             E'\n\n'
+           )
+    INTO v_ctx
+    FROM final f
+    JOIN app.documents d ON d.id = f.doc_id;
+
+  ELSIF v_mode = 'hybrid' THEN
     WITH sem_top AS (
       SELECT * FROM app.search_chunks(p_query, GREATEST(COALESCE(p_pin_sem, 0), 0), NULL)
     ),
@@ -98,13 +188,76 @@ BEGIN
   RETURN v_resp;
 END;
 $$;
-
-GRANT EXECUTE ON FUNCTION app.chat_rag_opts(text, int, text, float4, float4, int) TO anon;
 -- RAG search + chat functions
 SET search_path = app, public;
 
 -- Ensure no ambiguous overload remains
 DROP FUNCTION IF EXISTS app.search_chunks(text, int);
+
+-- Flag to indicate whether reranker calls are permitted (controlled via env RERANK_ENABLED)
+CREATE OR REPLACE FUNCTION app.rerank_enabled()
+RETURNS boolean
+LANGUAGE plpython3u
+AS $$
+import os
+return os.environ.get('RERANK_ENABLED', 'true').strip().lower() in ('1', 'true', 'yes', 'on')
+$$;
+
+GRANT EXECUTE ON FUNCTION app.rerank_enabled() TO anon;
+
+-- Invoke external reranker service (PL/Python)
+CREATE OR REPLACE FUNCTION app.invoke_reranker(
+  p_model text,
+  p_query text,
+  p_chunks text[],
+  p_endpoint text DEFAULT NULL,
+  p_timeout_seconds int DEFAULT 15
+)
+RETURNS float8[]
+LANGUAGE plpython3u
+AS $$
+import json
+import os
+import urllib.request
+from urllib.error import URLError, HTTPError
+
+enabled_res = plpy.execute("SELECT app.rerank_enabled() AS enabled", 1)
+if not enabled_res or not enabled_res[0]['enabled']:
+    return None
+
+endpoint = p_endpoint or os.environ.get('RERANK_ENDPOINT', 'http://reranker:8000/rerank')
+if not endpoint:
+    plpy.warning('invoke_reranker: endpoint missing')
+    return None
+
+payload = {
+    'model': p_model or '',
+    'query': p_query or '',
+    'documents': list(p_chunks or [])
+}
+
+req = urllib.request.Request(
+    endpoint,
+    data=json.dumps(payload).encode('utf-8'),
+    headers={'Content-Type': 'application/json'}
+)
+
+timeout = p_timeout_seconds or 15
+
+try:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        body = resp.read().decode('utf-8')
+        data = json.loads(body)
+        scores = data.get('scores')
+        if not isinstance(scores, list):
+            raise ValueError('missing scores array')
+        return [float(s) for s in scores]
+except (HTTPError, URLError, ValueError, TimeoutError, Exception) as exc:  # pylint: disable=broad-except
+    plpy.warning(f'invoke_reranker failed: {exc}')
+    return None
+$$;
+
+GRANT EXECUTE ON FUNCTION app.invoke_reranker(text, text, text[], text, int) TO anon;
 
 -- Search function to retrieve top-k chunks with distances
 CREATE OR REPLACE FUNCTION app.search_chunks(p_query text, k int DEFAULT 5, p_threshold float4 DEFAULT 0.8)
@@ -275,6 +428,130 @@ END;
 $$;
 
 GRANT EXECUTE ON FUNCTION app.search_chunks_hybrid(text, int, float4, float4) TO anon;
+
+-- Two-stage retrieval with reranking
+CREATE OR REPLACE FUNCTION app.search_chunks_rerank(
+  p_query text,
+  k int DEFAULT 5,
+  p_stage_k int DEFAULT 40,
+  p_stage_mode text DEFAULT 'hybrid',
+  p_w_lex float4 DEFAULT 0.3,
+  p_w_sem float4 DEFAULT 0.7,
+  p_rerank_model text DEFAULT NULL,
+  p_endpoint text DEFAULT NULL
+)
+RETURNS TABLE(doc_id bigint, seq int, chunk text, distance float4, rerank_score float4)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_stage_mode text := lower(coalesce(p_stage_mode, 'hybrid'));
+  v_stage_k int := GREATEST(COALESCE(p_stage_k, 0), k, 5);
+  v_model text := COALESCE(NULLIF(p_rerank_model, ''), app.rerank_model());
+  v_chunks text[];
+  v_doc_ids bigint[];
+  v_seqs int[];
+  v_distances float4[];
+  v_scores float8[];
+  v_has_scores boolean := false;
+BEGIN
+  WITH stage_raw AS (
+    SELECT
+      s.doc_id,
+      s.seq,
+      s.chunk,
+      s.distance
+    FROM app.search_chunks(p_query, v_stage_k, NULL) s
+    WHERE v_stage_mode = 'semantic'
+    UNION ALL
+    SELECT
+      h.doc_id,
+      h.seq,
+      h.chunk,
+      h.distance
+    FROM app.search_chunks_hybrid(p_query, v_stage_k, p_w_lex, p_w_sem) h
+    WHERE v_stage_mode <> 'semantic'
+  ), dedup AS (
+    SELECT DISTINCT ON (sr.doc_id, sr.seq)
+      sr.doc_id,
+      sr.seq,
+      sr.chunk,
+      sr.distance
+    FROM stage_raw sr
+    ORDER BY sr.doc_id, sr.seq, sr.distance
+  ), stage_ranked AS (
+    SELECT
+      row_number() OVER (ORDER BY d.distance ASC, d.doc_id, d.seq) AS stage_rank,
+      d.doc_id,
+      d.seq,
+      d.chunk,
+      d.distance
+    FROM dedup d
+  )
+  SELECT
+    array_agg(srk.chunk ORDER BY srk.stage_rank)      AS chunks,
+    array_agg(srk.doc_id ORDER BY srk.stage_rank)     AS doc_ids,
+    array_agg(srk.seq ORDER BY srk.stage_rank)        AS seqs,
+    array_agg(srk.distance ORDER BY srk.stage_rank)   AS distances
+  INTO v_chunks, v_doc_ids, v_seqs, v_distances
+  FROM stage_ranked srk;
+
+  IF v_chunks IS NULL OR array_length(v_chunks, 1) IS NULL THEN
+    RETURN;
+  END IF;
+
+  SELECT app.invoke_reranker(v_model, p_query, v_chunks, p_endpoint, 20)
+  INTO v_scores;
+
+  v_has_scores := v_scores IS NOT NULL AND array_length(v_scores, 1) IS NOT NULL;
+
+  INSERT INTO rerank_events(query, doc_id, seq, stage_rank, stage_distance, rerank_score, rerank_model)
+  SELECT
+    p_query,
+    v_doc_ids[g.idx],
+    v_seqs[g.idx],
+    g.idx,
+    v_distances[g.idx],
+    CASE
+      WHEN v_has_scores AND array_length(v_scores, 1) >= g.idx THEN v_scores[g.idx]::float4
+      ELSE NULL
+    END,
+    v_model
+  FROM generate_subscripts(v_doc_ids, 1) AS g(idx)
+  WHERE g.idx <= LEAST(array_length(v_doc_ids, 1), 200);
+
+  RETURN QUERY
+  WITH ranked AS (
+    SELECT
+      g.idx,
+      v_doc_ids[g.idx] AS doc_id,
+      v_seqs[g.idx]    AS seq,
+      v_chunks[g.idx]  AS chunk,
+      v_distances[g.idx] AS distance,
+      CASE
+        WHEN v_has_scores AND array_length(v_scores, 1) >= g.idx THEN v_scores[g.idx]::float4
+        ELSE NULL
+      END AS rerank_score
+    FROM generate_subscripts(v_doc_ids, 1) AS g(idx)
+  )
+  SELECT
+    r.doc_id,
+    r.seq,
+    r.chunk,
+    r.distance,
+    r.rerank_score
+  FROM ranked r
+  ORDER BY
+    CASE WHEN v_has_scores THEN r.rerank_score END DESC,
+    CASE WHEN v_has_scores THEN r.idx END,
+    r.distance,
+    r.idx
+  LIMIT k;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION app.search_chunks_rerank(text, int, int, text, float4, float4, text, text) TO anon;
 
 -- Chat completion that performs RAG internally and returns assistant text
 CREATE OR REPLACE FUNCTION app.chat_rag(p_query text, k int DEFAULT 5)
